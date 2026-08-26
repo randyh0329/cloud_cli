@@ -25,7 +25,7 @@ that can reach them. Lock the Access policy to your own identity *before* the tu
 |---|---|
 | 1. Project registry + REST API | done |
 | 2. tmux + `systemd --user` integration | done |
-| 3. Reverse proxy `/term/<slug>/*` | not started |
+| 3. Reverse proxy `/term/<slug>/*` | done |
 | 4. Multi-tab xterm.js frontend | not started |
 | 5. Paste-to-screenshot | not started |
 
@@ -71,7 +71,7 @@ ls -d /run/user/$(id -u)                        # must now exist
 git clone https://github.com/randyh0329/cloud_cli.git ~/Lab/cc_cloud
 cd ~/Lab/cc_cloud
 npm install
-npm test                       # ~29 tests, needs tmux
+npm test                       # 46 tests; needs tmux, does not need ttyd
 ```
 
 ### Install the systemd units
@@ -165,6 +165,22 @@ State layout:
   screenshots/<slug>/      pasted images; never auto-deleted, including on project delete
 ```
 
+### Testing the proxy without ttyd
+
+`scripts/fake-ttyd.js` stands in for `ttyd -p <port> -b /term/<slug>`: same base path, same
+`tty`-subprotocol WebSocket, echoes what you send it.
+
+```bash
+WEBTERM_STUB_SUPERVISOR=1 npm start &
+PORT=$(curl -s -XPOST localhost:3000/api/projects -H 'content-type: application/json' \
+       -d '{"slug":"testproj"}' | jq -r .port)
+node scripts/fake-ttyd.js testproj "$PORT" &
+curl -s localhost:3000/term/testproj/          # proxied HTML
+```
+
+Then open `http://localhost:3000/term/testproj/` — the page reports the WebSocket state, so
+"open (tty)" means the upgrade path works end to end.
+
 ## API
 
 | Method | Path | Notes |
@@ -187,6 +203,25 @@ curl -s -XDELETE localhost:3000/api/projects/my-app | jq
 
 `cwd` is an addition to the spec: without it every project's shell would start in `$HOME`. It
 must be an absolute path to an existing directory and defaults to `$HOME`.
+
+## The `/term/<slug>/` proxy
+
+Requests are forwarded to `127.0.0.1:<port>` with the path **unchanged**, because ttyd runs with
+`-b /term/<slug>` and already expects that prefix. Stripping it would make ttyd emit `/`-rooted
+asset, `/token` and `/ws` URLs that 404 on the way back.
+
+- The slug segment is matched **raw**, before any percent-decoding, and validated against the
+  same rule as the API. `%2e%2e`, `%2f`, `%00` and friends therefore never decode into a slug —
+  they simply fail the character class and 404 without an upstream call being made.
+- The proxy is mounted **before** `express.json()`. A body parser in front of it would consume
+  the request stream and forward an empty body.
+- WebSocket upgrades are handled on the `http.Server` directly, since Express never sees them.
+- A registered project whose ttyd is down returns **502** with the `systemctl` command to run,
+  on both the HTTP and the upgrade path — never a hang.
+
+Everything after the slug is passed through verbatim, including `..` segments. That is correct
+proxy behaviour and safe here because ttyd serves only its own embedded assets (webterm never
+passes `-s`), but it is worth remembering if you ever add a static root to the ttyd command.
 
 ### Slugs
 

@@ -5,6 +5,7 @@ const express = require('express');
 
 const config = require('./config');
 const apiRoutes = require('./routes');
+const proxy = require('./proxy');
 const { HttpError, notFound } = require('./errors');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -13,6 +14,11 @@ function createApp() {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 'loopback');
+
+  // The proxy must come before express.json(): the body parser would consume
+  // the request stream, leaving nothing to forward to ttyd. It only claims
+  // /term/*, and calls next() for everything else.
+  app.use(proxy.httpMiddleware);
 
   app.use(express.json({ limit: '64kb' }));
 
