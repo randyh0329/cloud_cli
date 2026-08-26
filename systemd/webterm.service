@@ -1,0 +1,22 @@
+[Unit]
+Description=webterm — multi-project web terminal (API + reverse proxy)
+Documentation=https://github.com/randyh0329/cloud_cli
+After=network.target
+
+[Service]
+Type=simple
+# Adjust if you cloned somewhere other than %h/Lab/cc_cloud.
+WorkingDirectory=%h/Lab/cc_cloud
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h/.local/bin
+ExecStart=/usr/bin/env node server/index.js
+
+Restart=always
+RestartSec=2s
+
+# webterm shells out to `systemctl --user` and `tmux`; it must keep its own
+# session bus and PATH, so no filesystem/privilege sandboxing here either.
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,19 @@
+{
+  "name": "webterm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-project web terminal for Claude Code (ttyd + tmux behind Cloudflare Access)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "install-units": "node server/index.js --install-units",
+    "test": "node --test 'test/*.test.js'"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.22.2"
+  }
+}

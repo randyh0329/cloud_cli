@@ -1,0 +1,47 @@
+[Unit]
+Description=ttyd web terminal for project %i
+Documentation=https://github.com/tsl0922/ttyd
+# %i is the project slug. webterm validates it against
+#   ^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$
+# before this unit is ever instantiated, so it cannot inject unit syntax or
+# escape %h/webterm/env/ below.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+
+# Written atomically by webterm on POST /api/projects; supplies WEBTERM_PORT
+# and WEBTERM_CWD for this instance. Its absence is why an orphaned
+# ttyd@<slug>.service fails fast rather than starting on a random port.
+EnvironmentFile=%h/webterm/env/%i.env
+
+# The systemd user manager's PATH is minimal. Cover both the distro location
+# (/usr/bin) and the GitHub-release location (/usr/local/bin) for ttyd.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h/.local/bin
+Environment=TERM=xterm-256color
+
+# spec §3.1 command, with two additions:
+#   -i 127.0.0.1  spec §5 requires ttyd to be loopback-only; ttyd's default is
+#                 to bind every interface. The Node proxy is the only client.
+#   -b /term/%i   ttyd is mounted behind the proxy at /term/<slug>/, so it must
+#                 emit its /token and /ws URLs under that prefix. Without -b it
+#                 emits /-rooted URLs that 404 at the proxy.
+# Also present, from the spec:
+#   -W            writable: honour client-initiated resize
+#   tmux new -A   attach if the session exists, so ttyd and webterm can both
+#                 restart without disturbing the running shell.
+# ${VAR} (braced) expands to exactly one argument, so a cwd containing spaces
+# is passed through intact.
+ExecStart=/usr/bin/env ttyd -p ${WEBTERM_PORT} -i 127.0.0.1 -b /term/%i -W tmux new -A -s %i -c ${WEBTERM_CWD}
+
+Restart=on-failure
+RestartSec=2s
+
+# Deliberately NOT hardened with NoNewPrivileges/ProtectHome/ProtectSystem:
+# this unit exists to hand you a full interactive shell, and those options
+# would break sudo and hide parts of the filesystem you are trying to work in.
+# The security boundary is Cloudflare Access plus the loopback bind, per spec §5.
+
+[Install]
+WantedBy=default.target

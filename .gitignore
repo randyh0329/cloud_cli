@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log*
+*.tmp
+
+# runtime state lives in $WEBTERM_HOME (default ~/webterm), never in the repo,
+# but guard against someone pointing it here
+webterm/
+projects.json
+screenshots/
