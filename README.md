@@ -26,7 +26,7 @@ that can reach them. Lock the Access policy to your own identity *before* the tu
 | 1. Project registry + REST API | done |
 | 2. tmux + `systemd --user` integration | done |
 | 3. Reverse proxy `/term/<slug>/*` | done |
-| 4. Multi-tab xterm.js frontend | not started |
+| 4. Multi-tab xterm.js frontend | done |
 | 5. Paste-to-screenshot | not started |
 
 ## Prerequisites
@@ -71,8 +71,12 @@ ls -d /run/user/$(id -u)                        # must now exist
 git clone https://github.com/randyh0329/cloud_cli.git ~/Lab/cc_cloud
 cd ~/Lab/cc_cloud
 npm install
-npm test                       # 46 tests; needs tmux, does not need ttyd
+npm test                       # 59 tests; needs tmux + python3, does not need ttyd
 ```
+
+`npm test` includes a browser test that drives the real UI in headless Chrome. It looks for
+`/usr/bin/google-chrome` (override with `CHROME_PATH`) and **skips itself** if Chrome is absent —
+it never fails for that reason.
 
 ### Install the systemd units
 
@@ -165,21 +169,23 @@ State layout:
   screenshots/<slug>/      pasted images; never auto-deleted, including on project delete
 ```
 
-### Testing the proxy without ttyd
+### Running the whole thing without ttyd
 
-`scripts/fake-ttyd.js` stands in for `ttyd -p <port> -b /term/<slug>`: same base path, same
-`tty`-subprotocol WebSocket, echoes what you send it.
+`scripts/fake-ttyd.js` stands in for `ttyd -p <port> -i 127.0.0.1 -b /term/<slug> -W`: same base
+path, same `/token` endpoint, same `tty`-subprotocol WebSocket, same wire protocol — and a real
+pty behind it, via `scripts/ptyhost.py` (python3 stdlib, so `npm install` needs no build tools).
+The frontend cannot tell it apart from the real thing.
 
 ```bash
 WEBTERM_STUB_SUPERVISOR=1 npm start &
 PORT=$(curl -s -XPOST localhost:3000/api/projects -H 'content-type: application/json' \
        -d '{"slug":"testproj"}' | jq -r .port)
-node scripts/fake-ttyd.js testproj "$PORT" &
-curl -s localhost:3000/term/testproj/          # proxied HTML
+node scripts/fake-ttyd.js testproj "$PORT" &          # default: tmux new -A -s testproj
 ```
 
-Then open `http://localhost:3000/term/testproj/` — the page reports the WebSocket state, so
-"open (tty)" means the upgrade path works end to end.
+Then open `http://localhost:3000/` and click the `testproj` tab — you get a working shell.
+Pass a command after the port to run something other than tmux, e.g.
+`node scripts/fake-ttyd.js testproj 7681 bash --norc -i`.
 
 ## API
 
@@ -231,6 +237,54 @@ No leading or trailing hyphen (would be parsed as a flag), 32 characters max, an
 reserved list (`api`, `term`, `default`, `system`, `user`, `.`, `..`). The registry re-validates
 on load, so a hand-edited `projects.json` cannot smuggle a bad slug into a shell-out.
 
+## The frontend
+
+Plain `<script>` tags, no bundler, no framework. xterm.js is vendored as a prebuilt UMD bundle in
+`public/vendor/`; `npm run vendor` re-copies it from `node_modules` after a version bump.
+
+```
+public/index.html      markup
+public/app.css         all styling
+public/js/ttyd-client.js   ttyd's WebSocket protocol, driving one xterm instance
+public/js/app.js           tab manager, project CRUD, toasts
+public/vendor/         @xterm/xterm 6.0.0 + @xterm/addon-fit 0.11.0 (UMD) + LICENSE
+```
+
+**We talk to ttyd's protocol directly rather than iframing its page.** ttyd's own UI is one
+terminal per page; tabs need N terminals in one document sharing one page's focus and paste
+handling. So `ttyd-client.js` reimplements the client half of the protocol: `GET <base>/token`,
+then a `tty`-subprotocol WebSocket whose first frame is `{AuthToken, columns, rows}`, then
+single-byte-tagged binary frames (`0` input/output, `1` resize/title, `2` pause/preferences,
+`3` resume). Flow control is honoured — the client sends PAUSE when its write queue passes 100 kB
+and RESUME when it drains, so a `yes`-flood throttles the pty instead of the browser.
+
+**Tab switching hides panes, it never destroys them** (spec §3.4). An inactive pane is
+`display: none`; its xterm instance, scrollback and WebSocket all stay live, so switching back is
+instant and nothing is missed while you were away. Terminals are created *lazily* on a tab's
+first activation, because a hidden element has no dimensions and `FitAddon` would size it wrong;
+after that they persist for the life of the page. The last active tab is remembered in
+`localStorage`.
+
+**Disconnects are visible and self-healing.** Each tab has a status dot (grey unopened, amber
+connecting, green live, red down) and a disconnected pane shows an overlay with the reason, the
+`systemctl --user status ttyd@<slug>.service` command to run, and a *Reconnect now* button.
+Reconnects back off exponentially to 15 s.
+
+**No global keyboard shortcuts.** Tab switching is click-only on purpose: every `Alt`, `Ctrl` and
+function-key combination belongs to the program inside the terminal, and Claude Code uses a lot
+of them.
+
+Delete is right-click (or a 600 ms long-press on touch) on a tab, then a confirmation, then
+`DELETE /api/projects/:slug`.
+
+### Testing it
+
+`test/frontend.test.js` runs the actual page in headless Chrome against `scripts/fake-ttyd.js`
+and a real pty — no mocked DOM, no mocked socket. It asserts, among other things, that a hidden
+tab's WebSocket is still `readyState === 1`, that its scrollback survives a round trip, that the
+two tabs' shells are independent, and that `stty size` inside the pty agrees with the column
+count `FitAddon` chose.
+
 ## Deviations from spec.md
 
 Each of these was flagged before implementation:
@@ -251,6 +305,10 @@ Each of these was flagged before implementation:
    webterm would kill every project's shell) or inside `ttyd@<slug>.service` (so deleting one
    project would kill all the others). `systemd-run --user --scope` decouples it. webterm also
    always creates the session before starting ttyd, so ttyd's `tmux new -A` never spawns a server.
+9. **Terminals connect lazily.** Spec §3.4 requires that a tab switch never reconnects, which this
+   honours — but it does not require opening N WebSockets to N ptys the moment the page loads. A
+   tab's terminal is created on its first activation and lives forever after. tmux keeps the
+   session running in the meantime either way, so nothing is lost by waiting.
 
 ## Troubleshooting
 
