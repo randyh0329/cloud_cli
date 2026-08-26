@@ -25,6 +25,13 @@ module.exports = {
 
   DEFAULT_CWD: os.homedir(),
 
+  // What ttyd is told to bind with `-i`. ttyd documents -i as an interface
+  // *name*, and whether the dotted-quad form is accepted depends on the
+  // libwebsockets it was built against — so if `-i 127.0.0.1` is rejected on
+  // your host, WEBTERM_TTYD_IFACE=lo is the fix. Either value is loopback-only;
+  // do not point this at a routable interface (spec §5).
+  TTYD_IFACE: process.env.WEBTERM_TTYD_IFACE || '127.0.0.1',
+
   // Largest pasted image accepted. A screenshot of a 4K display is ~5 MB.
   MAX_UPLOAD_BYTES: Number(process.env.WEBTERM_MAX_UPLOAD_BYTES || 12 * 1024 * 1024),
 

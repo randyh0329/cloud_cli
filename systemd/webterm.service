@@ -10,6 +10,9 @@ WorkingDirectory=%h/Lab/cc_cloud
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h/.local/bin
+# Uncomment if `./scripts/smoke.sh` reports that this ttyd wants an interface
+# name rather than an address for -i. Both values are loopback-only.
+#Environment=WEBTERM_TTYD_IFACE=lo
 ExecStart=/usr/bin/env node server/index.js
 
 Restart=always

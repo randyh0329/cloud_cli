@@ -22,8 +22,13 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h
 Environment=TERM=xterm-256color
 
 # spec §3.1 command, with two additions:
-#   -i 127.0.0.1  spec §5 requires ttyd to be loopback-only; ttyd's default is
+#   -i <iface>    spec §5 requires ttyd to be loopback-only; ttyd's default is
 #                 to bind every interface. The Node proxy is the only client.
+#                 ttyd documents -i as an interface *name*, and whether it also
+#                 accepts a dotted quad depends on the libwebsockets build, so
+#                 WEBTERM_IFACE is configurable: "127.0.0.1" by default, set
+#                 WEBTERM_TTYD_IFACE=lo if this ttyd rejects the address form.
+#                 scripts/smoke.sh probes which one works on your host.
 #   -b /term/%i   ttyd is mounted behind the proxy at /term/<slug>/, so it must
 #                 emit its /token and /ws URLs under that prefix. Without -b it
 #                 emits /-rooted URLs that 404 at the proxy.
@@ -33,7 +38,7 @@ Environment=TERM=xterm-256color
 #                 restart without disturbing the running shell.
 # ${VAR} (braced) expands to exactly one argument, so a cwd containing spaces
 # is passed through intact.
-ExecStart=/usr/bin/env ttyd -p ${WEBTERM_PORT} -i 127.0.0.1 -b /term/%i -W tmux new -A -s %i -c ${WEBTERM_CWD}
+ExecStart=/usr/bin/env ttyd -p ${WEBTERM_PORT} -i ${WEBTERM_IFACE} -b /term/%i -W tmux new -A -s %i -c ${WEBTERM_CWD}
 
 Restart=on-failure
 RestartSec=2s

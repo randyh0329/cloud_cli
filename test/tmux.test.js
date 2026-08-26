@@ -96,6 +96,16 @@ test('envQuote produces systemd-safe values and rejects newlines', () => {
   assert.throws(() => supervisor._envQuote('/a\nExecStart=/bin/sh'), /newlines/);
 });
 
+test('the ttyd bind interface accepts a name or an address, and nothing else', () => {
+  const ok = supervisor._assertIface;
+  assert.equal(ok('127.0.0.1'), '127.0.0.1');
+  assert.equal(ok('lo'), 'lo');
+  assert.equal(ok('::1'), '::1');
+  assert.throws(() => ok('lo -p 22'), /not an interface name/);
+  assert.throws(() => ok('0.0.0.0 --writable'), /not an interface name/);
+  assert.throws(() => ok(''), /not an interface name/);
+});
+
 test('portInUse detects a bound loopback port', async () => {
   const net = require('node:net');
   const srv = net.createServer().listen(0, '127.0.0.1');

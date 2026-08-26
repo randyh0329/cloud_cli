@@ -8,7 +8,8 @@
     "start": "node server/index.js",
     "install-units": "node server/index.js --install-units",
     "vendor": "cp node_modules/@xterm/xterm/lib/xterm.js node_modules/@xterm/xterm/css/xterm.css node_modules/@xterm/addon-fit/lib/addon-fit.js node_modules/@xterm/xterm/LICENSE public/vendor/ && mv public/vendor/LICENSE public/vendor/LICENSE.xterm",
-    "test": "node --test 'test/*.test.js'"
+    "test": "node --test 'test/*.test.js'",
+    "smoke": "scripts/smoke.sh"
   },
   "engines": {
     "node": ">=20"

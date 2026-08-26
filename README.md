@@ -29,6 +29,24 @@ that can reach them. Lock the Access policy to your own identity *before* the tu
 | 4. Multi-tab xterm.js frontend | done |
 | 5. Paste-to-screenshot | done |
 
+## Quick start on a fresh Ubuntu VM
+
+```bash
+git clone https://github.com/randyh0329/cloud_cli.git ~/webterm-src
+cd ~/webterm-src
+./install.sh          # tmux, Node LTS, ttyd >= 1.7, headless Chrome, linger, npm install
+npm test              # 80 unit + browser tests
+./scripts/smoke.sh    # end-to-end against real ttyd, systemd --user and tmux
+```
+
+`install.sh` is idempotent, expects a normal user with `sudo` (**not** root — webterm drives
+your `systemd --user` manager, and root has none on a headless VM), and takes `--no-browser` /
+`--no-ttyd` if you want to skip either. It installs Node from the official nodejs.org tarball
+after checking it against the published SHA256 — which proves the download arrived intact, not
+that nodejs.org is trustworthy.
+
+Everything below is the same install done by hand.
+
 ## Prerequisites
 
 - Linux with systemd, Node.js ≥ 20
@@ -71,12 +89,47 @@ ls -d /run/user/$(id -u)                        # must now exist
 git clone https://github.com/randyh0329/cloud_cli.git ~/Lab/cc_cloud
 cd ~/Lab/cc_cloud
 npm install
-npm test                       # 79 tests; needs tmux + python3, does not need ttyd
+npm test                       # 80 tests; needs tmux + python3, does not need ttyd
 ```
 
 `npm test` includes a browser test that drives the real UI in headless Chrome. It looks for
 `/usr/bin/google-chrome` (override with `CHROME_PATH`) and **skips itself** if Chrome is absent —
 it never fails for that reason.
+
+### The smoke test
+
+`npm test` deliberately stubs out ttyd and systemd so it runs anywhere. `./scripts/smoke.sh`
+covers the rest, on the machine that will actually host webterm:
+
+```bash
+./scripts/smoke.sh             # ~60s; SMOKE_PORT=3999, SMOKE_KEEP=1 to leave the project up
+```
+
+It creates one throwaway project (`smoke-<random>`), then checks, in order:
+
+| Step | What only a real host can tell us |
+|---|---|
+| `-i` probe | whether *your* ttyd accepts `-i 127.0.0.1` or needs `-i lo`, and that it binds loopback only |
+| create | `ttyd@<slug>.service` reaches `active`, the tmux session exists, the env file is 0600 |
+| cgroup | the tmux server is **not** inside the ttyd unit's cgroup |
+| proxy | `/term/<slug>/` and `/token` return 200; unknown, encoded-traversal and malformed slugs 404 |
+| `scripts/smoke-ws.js` | ttyd's own `/token` → `tty` subprotocol → auth frame → I/O → resize |
+| upload | the path is typed into the pane and *not* executed; a non-image is still a 400 |
+| restarts | restarting ttyd, and killing webterm, both leave the shell and its variables alive |
+| `scripts/smoke-browser.js` | the UI drives a real shell, and a pasted PNG comes back through tmux into the browser's own terminal |
+| delete | unit inactive, session gone, port released, screenshots kept |
+
+It refuses to run if `webterm.service` is already active, because two webterms would both write
+`~/webterm/projects.json`. It uses your real `~/webterm` (a temp `WEBTERM_HOME` would be invisible
+to `ttyd@.service`, which hardcodes `EnvironmentFile=%h/webterm/env/%i.env`) and cleans up the
+project, unit, session and env file on exit, including on Ctrl-C.
+
+The two Node scripts can also be run on their own against a live webterm:
+
+```bash
+node scripts/smoke-ws.js      --base http://127.0.0.1:3000 --slug my-app
+node scripts/smoke-browser.js --base http://127.0.0.1:3000 --slug my-app
+```
 
 ### Install the systemd units
 
@@ -159,6 +212,7 @@ Environment variables, all optional:
 | `WEBTERM_PORT_BASE` | `7681` | First port in the ttyd pool |
 | `WEBTERM_PORT_COUNT` | `100` | Pool size, i.e. maximum concurrent projects |
 | `WEBTERM_MAX_UPLOAD_BYTES` | `12582912` | Largest pasted image accepted (12 MB) |
+| `WEBTERM_TTYD_IFACE` | `127.0.0.1` | What ttyd is told to bind with `-i`. Set to `lo` if your ttyd rejects the address form — see below |
 | `WEBTERM_STUB_SUPERVISOR` | unset | `1` skips all tmux/systemd side effects (frontend dev, tests) |
 
 State layout:
@@ -166,9 +220,20 @@ State layout:
 ```
 ~/webterm/
   projects.json            the registry — atomic rename on every change
-  env/<slug>.env           WEBTERM_PORT / WEBTERM_CWD, read by ttyd@<slug>.service
+  env/<slug>.env           WEBTERM_PORT / WEBTERM_IFACE / WEBTERM_CWD, read by ttyd@<slug>.service
   screenshots/<slug>/      pasted images; never auto-deleted, including on project delete
 ```
+
+### Which `-i` does your ttyd want?
+
+ttyd documents `-i/--interface` as an interface *name* (`eth0`) or a UNIX socket path, and
+whether it also accepts a dotted quad depends on the libwebsockets it was built against. Rather
+than guess, the value is a variable: webterm writes `WEBTERM_IFACE` into the unit's env file and
+`ttyd@.service` passes it through as `-i ${WEBTERM_IFACE}`. `scripts/smoke.sh` probes both forms
+and tells you which one binds loopback-only on your host. If it is `lo`, add
+`Environment=WEBTERM_TTYD_IFACE=lo` to `webterm.service` (or export it before `npm start`) and
+re-create the project so the env file is rewritten. Both values are loopback-only; never point
+this at a routable interface.
 
 ### Running the whole thing without ttyd
 
@@ -322,7 +387,9 @@ Each of these was flagged before implementation:
 
 1. **`-b /term/<slug>` added to the ttyd command.** Spec §3.1's command serves everything at `/`,
    so behind the `/term/<slug>/` proxy mount ttyd would emit `/`-rooted URLs that 404.
-2. **`-i 127.0.0.1` added.** Spec §5 requires a loopback bind; ttyd's default is all interfaces.
+2. **`-i ${WEBTERM_IFACE}` added.** Spec §5 requires a loopback bind; ttyd's default is all
+   interfaces. It is a variable (default `127.0.0.1`) rather than a literal because ttyd
+   documents `-i` as an interface name — see "Which `-i` does your ttyd want?" above.
 3. **`send-keys` gets `-l --`.** Spec §3.5's `tmux send-keys -t <slug> "<path> "` resolves each
    argument as a *key name* first, so a payload like `Enter` would be executed instead of typed.
 4. **Exact tmux targets.** `-t <slug>` prefix-matches, so it can hit `<slug>-two`. Sessions use
@@ -365,6 +432,15 @@ cat ~/webterm/env/my-app.env
 ```
 
 **`ttyd: invalid option -- 'b'`** — ttyd is older than 1.7. Reinstall from the release binary.
+
+**The unit starts and immediately fails, mentioning the interface.** Your ttyd wants an interface
+name. Set `WEBTERM_TTYD_IFACE=lo` for webterm and re-create the project. `./scripts/smoke.sh`
+prints which form works.
+
+**`ttyd@<slug>.service` fails with `Failed to load environment files`.** The env file is written
+by `POST /api/projects`; an orphaned unit from a deleted project has none, which is deliberate —
+it fails fast instead of starting on a random port. `systemctl --user disable --now
+ttyd@<slug>.service` to clear it.
 
 **A terminal is blank but the unit is active.** The tmux session and the ttyd process are
 independent; check `tmux ls`. `GET /api/projects` reports both (`status.unit`, `status.tmux`).
