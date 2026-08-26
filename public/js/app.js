@@ -342,6 +342,73 @@ async function confirmDelete(slug) {
   }
 }
 
+// ── paste-to-screenshot (spec §3.5) ────────────────────────────────────
+
+/** First image among the clipboard items, or null for an ordinary text paste. */
+function clipboardImage(clipboardData) {
+  if (!clipboardData) return null;
+  for (const item of clipboardData.items || []) {
+    if (item.kind === 'file' && String(item.type).startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file && file.size > 0) return file;
+    }
+  }
+  return null;
+}
+
+async function uploadScreenshot(slug, file) {
+  const form = new FormData();
+  form.append('project', slug);
+  // The server names the file from its own bytes; this name is never trusted.
+  form.append('file', file, file.name || 'clipboard.png');
+
+  const pending = toast('Uploading screenshot…', 'info', 120000);
+  try {
+    const res = await fetch('/api/upload', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: form,
+    });
+    const data = await res.json().catch(() => null);
+    pending.remove();
+    if (!res.ok) {
+      throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
+    }
+    if (data.injected) toast(`pasted → ${data.path}`, 'ok', 6000);
+    else toast(`${data.warning}\n${data.path}`, 'error', 12000);
+  } catch (err) {
+    pending.remove();
+    toast(`Screenshot upload failed: ${err.message}`, 'error', 9000);
+  } finally {
+    const entry = tabs.get(slug);
+    if (entry && entry.term) entry.term.focus();
+  }
+}
+
+/**
+ * Attached at the document level in the capture phase, so it works whichever
+ * tab is focused and the image bytes never reach xterm's paste handling.
+ * A text paste is left entirely alone — xterm handles that itself.
+ */
+document.addEventListener(
+  'paste',
+  (ev) => {
+    if (els.dialog.open) return; // pasting into the New Project form
+    const file = clipboardImage(ev.clipboardData);
+    if (!file) return;
+
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    if (!activeSlug) {
+      toast('Open a project tab before pasting a screenshot', 'error');
+      return;
+    }
+    uploadScreenshot(activeSlug, file);
+  },
+  true
+);
+
 // ── wiring ─────────────────────────────────────────────────────────────
 
 $('#new-project').addEventListener('click', openNewDialog);
@@ -370,6 +437,7 @@ window.webterm = {
   tabs,
   toast,
   reload: loadProjects,
+  uploadScreenshot,
 };
 
 loadProjects().then(reportHealth);

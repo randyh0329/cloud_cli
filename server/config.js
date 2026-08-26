@@ -25,6 +25,9 @@ module.exports = {
 
   DEFAULT_CWD: os.homedir(),
 
+  // Largest pasted image accepted. A screenshot of a 4K display is ~5 MB.
+  MAX_UPLOAD_BYTES: Number(process.env.WEBTERM_MAX_UPLOAD_BYTES || 12 * 1024 * 1024),
+
   // Set truthy to skip all tmux/systemd side effects (milestone-1 behaviour).
   STUB_SUPERVISOR: process.env.WEBTERM_STUB_SUPERVISOR === '1',
 };

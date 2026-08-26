@@ -96,6 +96,33 @@ const bufferText = (slug) =>
     return lines.join('\n');
   }, slug);
 
+/**
+ * Fire a real `paste` event at the focused terminal with a synthetic clipboard.
+ * Existing toasts are cleared first so an assertion cannot match a stale one.
+ */
+async function paste(pg, { image = false, text = '' }) {
+  await pg.evaluate(() => document.querySelectorAll('.toast').forEach((t) => t.remove()));
+  await pg.evaluate(
+    (opts) => {
+      const dt = new DataTransfer();
+      if (opts.image) {
+        const head = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        const body = [...'IHDR and a fake png body'].map((c) => c.charCodeAt(0));
+        dt.items.add(
+          new File([new Uint8Array([...head, ...body])], 'screenshot.png', { type: 'image/png' })
+        );
+      }
+      if (opts.text) dt.setData('text/plain', opts.text);
+      const target = document.querySelector('.pane.active .xterm-helper-textarea') || document.body;
+      target.focus();
+      target.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+      );
+    },
+    { image, text }
+  );
+}
+
 const tabState = (slug) =>
   page.evaluate((s) => {
     const t = window.webterm.tabs.get(s);
@@ -234,6 +261,69 @@ describe('frontend', { skip: haveChrome ? false : `Chrome not found at ${CHROME}
     await page.click('.tab[data-slug="alpha"]');
     await page.waitForFunction(() => window.webterm.tabs.get('alpha').pane.classList.contains('active'));
     assert.match(await bufferText('alpha'), /READY-42/, 'scrollback survived the tab switch');
+  });
+
+  test('pasting an image uploads it and types the path into the active project', async () => {
+    const supervisor = require('../server/supervisor');
+    const before = supervisor._injected.length;
+
+    await paste(page, { image: true });
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('.toast')].some((t) => t.textContent.startsWith('pasted → ')),
+      { timeout: 15000 }
+    );
+
+    assert.equal(supervisor._injected.length, before + 1, 'exactly one injection');
+    const { slug, text } = supervisor._injected.at(-1);
+    assert.equal(slug, 'alpha', 'the upload used the active tab');
+    assert.match(text, / $/);
+    assert.doesNotMatch(text, /[\r\n]/, 'no Enter was sent');
+
+    const saved = text.trim();
+    assert.equal(fs.existsSync(saved), true, `expected a file at ${saved}`);
+    assert.equal(fs.readFileSync(saved).subarray(0, 4).toString('latin1'), '\x89PNG');
+
+    const toast = await page.$eval('.toast', (el) => el.textContent);
+    assert.equal(toast, `pasted → ${saved}`);
+  });
+
+  test('pasting text is left to the terminal, with no upload', async () => {
+    const supervisor = require('../server/supervisor');
+    const before = supervisor._injected.length;
+
+    await paste(page, { text: 'PASTED-PLAIN-TEXT' });
+    await page.waitForFunction(
+      () => {
+        const b = window.webterm.tabs.get('alpha').term.term.buffer.active;
+        for (let i = 0; i < b.length; i += 1) {
+          if ((b.getLine(i)?.translateToString(true) || '').includes('PASTED-PLAIN-TEXT')) return true;
+        }
+        return false;
+      },
+      { timeout: 15000 }
+    );
+    assert.equal(supervisor._injected.length, before, 'a text paste must not hit /api/upload');
+    // Clear the line so it does not interfere with later tests.
+    await page.keyboard.press('Escape');
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyU');
+    await page.keyboard.up('Control');
+  });
+
+  test('the paste targets whichever tab is active', async () => {
+    const supervisor = require('../server/supervisor');
+    await page.click('.tab[data-slug="beta"]');
+    await page.waitForFunction(() => window.webterm.activeSlug() === 'beta');
+
+    await paste(page, { image: true });
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('.toast')].some((t) => t.textContent.startsWith('pasted → ')),
+      { timeout: 15000 }
+    );
+    assert.equal(supervisor._injected.at(-1).slug, 'beta');
+
+    await page.click('.tab[data-slug="alpha"]');
+    await page.waitForFunction(() => window.webterm.activeSlug() === 'alpha');
   });
 
   test('+ New Project creates a project and opens its tab', async () => {

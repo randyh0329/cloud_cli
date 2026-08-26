@@ -27,7 +27,7 @@ that can reach them. Lock the Access policy to your own identity *before* the tu
 | 2. tmux + `systemd --user` integration | done |
 | 3. Reverse proxy `/term/<slug>/*` | done |
 | 4. Multi-tab xterm.js frontend | done |
-| 5. Paste-to-screenshot | not started |
+| 5. Paste-to-screenshot | done |
 
 ## Prerequisites
 
@@ -71,7 +71,7 @@ ls -d /run/user/$(id -u)                        # must now exist
 git clone https://github.com/randyh0329/cloud_cli.git ~/Lab/cc_cloud
 cd ~/Lab/cc_cloud
 npm install
-npm test                       # 59 tests; needs tmux + python3, does not need ttyd
+npm test                       # 79 tests; needs tmux + python3, does not need ttyd
 ```
 
 `npm test` includes a browser test that drives the real UI in headless Chrome. It looks for
@@ -158,6 +158,7 @@ Environment variables, all optional:
 | `WEBTERM_HOME` | `~/webterm` | State directory: registry, screenshots, unit env files |
 | `WEBTERM_PORT_BASE` | `7681` | First port in the ttyd pool |
 | `WEBTERM_PORT_COUNT` | `100` | Pool size, i.e. maximum concurrent projects |
+| `WEBTERM_MAX_UPLOAD_BYTES` | `12582912` | Largest pasted image accepted (12 MB) |
 | `WEBTERM_STUB_SUPERVISOR` | unset | `1` skips all tmux/systemd side effects (frontend dev, tests) |
 
 State layout:
@@ -196,7 +197,7 @@ Pass a command after the port to run something other than tmux, e.g.
 | `GET` | `/api/projects/:slug` | One project |
 | `POST` | `/api/projects` | `{slug, cwd?}` → 201. Allocates a port, creates the tmux session, starts `ttyd@<slug>` |
 | `DELETE` | `/api/projects/:slug` | Stops+disables the unit, kills the session, frees the port. Screenshots are kept |
-| `POST` | `/api/upload` | *(milestone 5)* |
+| `POST` | `/api/upload` | `multipart/form-data {project, file}` → saves the image and types its path into the tmux pane |
 
 ```bash
 curl -s localhost:3000/api/health | jq
@@ -246,7 +247,7 @@ Plain `<script>` tags, no bundler, no framework. xterm.js is vendored as a prebu
 public/index.html      markup
 public/app.css         all styling
 public/js/ttyd-client.js   ttyd's WebSocket protocol, driving one xterm instance
-public/js/app.js           tab manager, project CRUD, toasts
+public/js/app.js           tab manager, project CRUD, paste handler, toasts
 public/vendor/         @xterm/xterm 6.0.0 + @xterm/addon-fit 0.11.0 (UMD) + LICENSE
 ```
 
@@ -285,6 +286,36 @@ tab's WebSocket is still `readyState === 1`, that its scrollback survives a roun
 two tabs' shells are independent, and that `stty size` inside the pty agrees with the column
 count `FitAddon` chose.
 
+## Paste-to-screenshot
+
+Copy an image anywhere, focus a terminal tab, press ⌘V / Ctrl+V. The image is saved under
+`~/webterm/screenshots/<slug>/` and its absolute path is **typed** at the cursor — with a trailing
+space and no Enter — so you can write the rest of the prompt around it before submitting.
+
+```
+paste ──► POST /api/upload (multipart: project, file)
+             ├─ save  ~/webterm/screenshots/<slug>/2026-08-26T13-41-05-123Z.png
+             └─ tmux send-keys -t '=<slug>:' -l -- '<that path> '
+          ◄── 200 {path, filename, bytes, injected}   →  toast: "pasted → /path/…png"
+```
+
+The injection goes through tmux rather than the terminal's WebSocket (spec §3.5): it reaches the
+session no matter which client is attached, and webterm never has to track individual sockets.
+
+- The handler is on `document` in the **capture phase**, so it works whichever tab is focused and
+  the image bytes never reach xterm. An ordinary **text** paste is not touched — xterm handles it.
+- The upload is tagged with the **currently active tab's** slug.
+- **The file type comes from the bytes, not from the client.** The first few bytes must match PNG,
+  JPEG, GIF or WebP; the declared `Content-Type` and the multipart `filename` are both ignored, so
+  a `filename` of `../../../../etc/cron.d/pwned.png` changes nothing about where the file lands.
+- The name is always a server-generated timestamp (`2026-08-26T13-41-05-123Z.png`), opened `wx` at
+  mode 0600, so two pastes in the same millisecond cannot overwrite each other.
+- Uploads are buffered in memory, never staged in a temp file, so a rejected paste leaves nothing
+  on disk. Anything over `WEBTERM_MAX_UPLOAD_BYTES` is a 413.
+- If the tmux session has died, the response is still **200** with `injected: false` and a
+  `warning` — the file was saved, and the UI shows a red toast with the path so the paste is not
+  silently lost.
+
 ## Deviations from spec.md
 
 Each of these was flagged before implementation:
@@ -309,6 +340,15 @@ Each of these was flagged before implementation:
    honours — but it does not require opening N WebSockets to N ptys the moment the page loads. A
    tab's terminal is created on its first activation and lives forever after. tmux keeps the
    session running in the meantime either way, so nothing is lost by waiting.
+10. **The injected path is shell-quoted only if it needs it.** Spec §3.5 types the bare path, which
+    is right — Claude Code's path detection wants it bare, and paths under `~/webterm/screenshots/`
+    contain nothing a shell reacts to. But `$HOME` is not ours to assume: if it holds a space or a
+    quote, an unquoted path silently becomes two arguments. So a path outside
+    `[A-Za-z0-9_@%+=:,./-]` gets single-quoted, and every ordinary path stays bare.
+11. **A dead tmux session is a 200, not an error.** Spec §3.5 responds `200 {path}`. When the file
+    saved but `send-keys` failed there is no honest 2xx-or-4xx answer, and returning an error would
+    imply the upload was lost. The response carries `injected: false` and a `warning` instead, and
+    the toast turns red.
 
 ## Troubleshooting
 
@@ -328,6 +368,12 @@ cat ~/webterm/env/my-app.env
 
 **A terminal is blank but the unit is active.** The tmux session and the ttyd process are
 independent; check `tmux ls`. `GET /api/projects` reports both (`status.unit`, `status.tmux`).
+
+**Pasting a screenshot does nothing.** The browser only puts an image on the clipboard for a real
+image copy — "copy image" in a page, a screenshot tool, ⌘⇧4 on macOS. Copying a *file* in a file
+manager yields a file reference, not `image/*`, and falls through to a normal text paste. If a red
+toast appears instead, it carries the reason. Over the tunnel this needs HTTPS, which Cloudflare
+already provides; on a plain-HTTP origin some browsers withhold clipboard image data.
 
 **Sessions died when I restarted webterm.** The transient scope wasn't available at the time —
 webterm logs a warning when it falls back. Confirm lingering is on and `systemd-run` is present.

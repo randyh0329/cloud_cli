@@ -229,6 +229,16 @@ async function down({ slug }) {
   return result;
 }
 
+/**
+ * Type `text` into the project's tmux pane. Deliberately routed through tmux
+ * rather than the ttyd WebSocket (spec §3.5): it reaches the session whichever
+ * client is attached, and webterm never has to track individual sockets.
+ */
+async function inject({ slug, text }) {
+  await tmux.sendKeysLiteral(slug, text);
+  return { injected: true };
+}
+
 /** Liveness for one project. Never throws. */
 async function status(slug) {
   const [unit, sessions] = await Promise.all([
@@ -270,6 +280,13 @@ const stub = {
     console.log(`[supervisor:stub] down slug=${slug}`);
     return { unit: 'stubbed', tmux: 'stubbed', env: 'stubbed', errors: [] };
   },
+  // Recorded rather than sent, so tests can assert the exact keystrokes.
+  inject: async ({ slug, text }) => {
+    stub._injected.push({ slug, text });
+    console.log(`[supervisor:stub] inject slug=${slug} text=${JSON.stringify(text)}`);
+    return { injected: true, stub: true };
+  },
+  _injected: [],
   status: async () => ({ unit: 'stubbed', tmux: null }),
   statusAll: async (slugs) => new Map(slugs.map((s) => [s, { unit: 'stubbed', tmux: null }])),
   preflight: async () => ({ ok: true, stub: true, problems: [], tmux: null, ttyd: null }),
@@ -283,6 +300,7 @@ const stub = {
 const real = {
   up,
   down,
+  inject,
   status,
   statusAll,
   preflight,
