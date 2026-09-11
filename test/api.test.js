@@ -4,9 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { test, before, after } = require('node:test');
+const { test, before, after, describe } = require('node:test');
 
 process.env.WEBTERM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-api-'));
+// A blank cwd now creates <PROJECTS_ROOT>/<slug>; keep that out of the real
+// ~/projects while testing.
+process.env.WEBTERM_PROJECTS_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-proj-'));
 // Exercise the HTTP/registry layer without touching tmux or systemd; the real
 // supervisor has its own integration tests in tmux.test.js.
 process.env.WEBTERM_STUB_SUPERVISOR = '1';
@@ -57,7 +60,6 @@ test('POST /api/projects creates a project', async () => {
   assert.equal(r.status, 201);
   assert.equal(r.json.slug, 'alpha');
   assert.equal(r.json.port, config.PORT_BASE);
-  assert.equal(r.json.cwd, os.homedir());
   assert.equal(r.json.url, '/term/alpha/');
   assert.equal(r.json.screenshot_dir, path.join(config.SCREENSHOTS_DIR, 'alpha'));
   assert.ok(fs.statSync(r.json.screenshot_dir).isDirectory(), 'screenshot dir created');
@@ -140,4 +142,34 @@ test('static frontend is served at /', async () => {
   const r = await req('GET', '/');
   assert.equal(r.status, 200);
   assert.match(r.text, /<html/);
+});
+
+// Last: these add projects, and several tests above assert the exact contents
+// of GET /api/projects.
+describe('a blank cwd makes the directory for you', () => {
+  test('it is <PROJECTS_ROOT>/<slug>, created on the spot', async () => {
+    const r = await req('POST', '/api/projects', { slug: 'own-dir' });
+    assert.equal(r.status, 201);
+    assert.equal(r.json.cwd, path.join(config.PROJECTS_ROOT, 'own-dir'));
+    assert.ok(fs.statSync(r.json.cwd).isDirectory(), 'the directory exists afterwards');
+    assert.notEqual(r.json.cwd, os.homedir(), 'projects no longer all share $HOME');
+  });
+
+  test('an existing directory is reused, and its contents left alone', async () => {
+    const dir = path.join(config.PROJECTS_ROOT, 'pre-made');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'keep.txt'), 'work in progress');
+    const r = await req('POST', '/api/projects', { slug: 'pre-made' });
+    assert.equal(r.status, 201);
+    assert.equal(r.json.cwd, dir);
+    assert.equal(fs.readFileSync(path.join(dir, 'keep.txt'), 'utf8'), 'work in progress');
+  });
+
+  test('an explicit path must still exist — only blank auto-creates', async () => {
+    const missing = path.join(os.tmpdir(), 'webterm-not-there', 'nested');
+    const r = await req('POST', '/api/projects', { slug: 'explicit-missing', cwd: missing });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /does not exist/);
+    assert.equal(fs.existsSync(missing), false, 'and nothing was created behind our back');
+  });
 });

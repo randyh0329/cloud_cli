@@ -11,6 +11,10 @@ const { WebSocketServer, WebSocket } = require('ws');
 
 process.env.WEBTERM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-proxy-'));
 process.env.WEBTERM_STUB_SUPERVISOR = '1';
+// The fake upstreams below bind the ports the registry hands out, so they must
+// not be the real pool: on a host where webterm is actually running, ttyd
+// already owns 7681+ and this file would fight it for the socket.
+process.env.WEBTERM_PORT_BASE = process.env.WEBTERM_PORT_BASE || '27681';
 
 const registry = require('../server/registry');
 const proxy = require('../server/proxy');

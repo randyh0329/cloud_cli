@@ -193,8 +193,20 @@ cd "$REPO"
 npm install --no-audit --no-fund
 ok "$(ls node_modules | wc -l) packages in $REPO/node_modules"
 
-step "systemd unit"
-npm run --silent install-units || warn "install-units reported a problem — see its output above"
+# ------------------------------------------------------------- units ----
+# Installs ttyd@.service and webterm.service (the latter with WorkingDirectory
+# rewritten to $REPO), then enables webterm at boot. Enabled but NOT started:
+# `./scripts/smoke.sh` refuses to run while webterm.service is active, and it
+# is the next thing the README tells you to do.
+step "systemd units + boot"
+npm run --silent enable-boot || warn "enable-boot reported a problem — see its output above"
+
+BOOT="$(XDG_RUNTIME_DIR="/run/user/$(id -u)" systemctl --user is-enabled webterm.service 2>&1 || true)"
+if [ "$BOOT" = "enabled" ]; then
+  ok "webterm.service will start at boot"
+else
+  warn "webterm.service is '$BOOT', not 'enabled' — run: systemctl --user enable webterm.service"
+fi
 
 # ------------------------------------------------------------- done ----
 step "Ready"
@@ -204,11 +216,17 @@ cat <<EOF
   ttyd      $(command -v ttyd >/dev/null && ttyd_version || echo 'not installed')
   browser   ${BROWSER:-none (browser tests will skip)}
   linger    $(loginctl show-user "$USER" --property=Linger | cut -d= -f2)
+  at boot   webterm.service $BOOT (from $REPO)
 
 Next:
   cd $REPO
   npm test              # unit + browser suite, no ttyd or systemd needed
   ./scripts/smoke.sh    # end-to-end against real ttyd, systemd --user and tmux
+
+webterm.service is enabled but not running — smoke.sh wants the port to itself.
+Start it when you are done testing:
+  systemctl --user start webterm.service
+  journalctl --user -u webterm -f
 EOF
 if [ -n "$BROWSER" ] && [ "$BROWSER" != /usr/bin/google-chrome ]; then
   echo "  (export CHROME_PATH=$BROWSER first — the default path is /usr/bin/google-chrome)"

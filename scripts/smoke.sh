@@ -47,8 +47,13 @@ expect() {
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1"; note "expected: $3"; note "     got: $2"; fi
 }
 # expect_match <description> <actual> <extended regex>
+#
+# A here-string, not `printf | grep -q`: with `pipefail` on, grep -q exits the
+# moment it matches, printf takes SIGPIPE on the rest, and the pipeline reports
+# 141 — so a *successful* match on a body bigger than the 64K pipe buffer reads
+# as a failure. ttyd's index.html is ~730 KB, which hit exactly that.
 expect_match() {
-  if printf '%s' "$2" | grep -Eq -- "$3"; then ok "$1"; else bad "$1"; note "  /$3/ did not match:"; note "$(printf '%s' "$2" | head -c 400)"; fi
+  if grep -Eq -- "$3" <<<"$2"; then ok "$1"; else bad "$1"; note "  /$3/ did not match:"; note "$(printf '%s' "$2" | head -c 400)"; fi
 }
 
 WEBTERM_PID=""
@@ -71,6 +76,9 @@ cleanup() {
   systemctl --user reset-failed "ttyd@$SLUG.service" >/dev/null 2>&1
   tmux kill-session -t "=$SLUG" >/dev/null 2>&1
   rm -f "$STATE/env/$SLUG.env"
+  # This project was created with no cwd, so webterm made one for it. rmdir,
+  # never rm -rf: if anything ended up in there it is not ours to delete.
+  rmdir "${WEBTERM_PROJECTS_ROOT:-$HOME/projects}/$SLUG" 2>/dev/null
   if [ "$PROJECT_CREATED" = "1" ]; then
     node -e '
       const fs = require("fs");
@@ -195,10 +203,21 @@ done
 export WEBTERM_TTYD_IFACE="$IFACE"
 
 # ============================================================ unit + boot ====
-step "Install the unit and start webterm on $BASE"
+step "Install the units and start webterm on $BASE"
+# Plain install-units, not enable-boot: this script is a test run, and it has
+# no business deciding that this host serves webterm on every reboot.
 npm run --silent install-units >"$TMP/install-units.log" 2>&1
 grep -q 'ttyd@.service' "$TMP/install-units.log" && ok "ttyd@.service synced to ~/.config/systemd/user/" \
   || bad "install-units did not report installing the template ($TMP/install-units.log)"
+
+# WorkingDirectory is substituted at install time; if it still points at the
+# placeholder, webterm.service dies at boot with a bare status=200/CHDIR.
+UNIT_WD="$(awk -F= '/^WorkingDirectory=/{print $2}' "$HOME/.config/systemd/user/webterm.service" 2>/dev/null | tail -1)"
+if [ "$UNIT_WD" = "$REPO" ]; then
+  ok "webterm.service WorkingDirectory=$UNIT_WD"
+else
+  bad "webterm.service WorkingDirectory is '${UNIT_WD:-missing}', expected '$REPO'"
+fi
 
 PORT="$PORT" node server/index.js >"$LOG" 2>&1 &
 WEBTERM_PID=$!
@@ -238,6 +257,15 @@ ok "POST /api/projects -> 201, ttyd port $TTYD_PORT"
 
 expect "the unit is active" "$(systemctl --user is-active "ttyd@$SLUG.service")" "active"
 if tmux has-session -t "=$SLUG" 2>/dev/null; then ok "tmux session \"$SLUG\" exists"; else bad "tmux session \"$SLUG\" is missing"; fi
+
+# No cwd was sent, so webterm should have made one rather than dropping the
+# session into $HOME alongside every other project.
+PROJ_CWD="$(printf '%s' "$API_BODY" | jq -r '.cwd')"
+expect "a directory was made for the project" \
+  "$PROJ_CWD" "${WEBTERM_PROJECTS_ROOT:-$HOME/projects}/$SLUG"
+[ -d "$PROJ_CWD" ] && ok "$PROJ_CWD exists on disk" || bad "$PROJ_CWD was reported but not created"
+expect "the shell actually starts there" \
+  "$(tmux display-message -p -t "=$SLUG:" '#{pane_current_path}' 2>/dev/null)" "$PROJ_CWD"
 
 ENVFILE="$STATE/env/$SLUG.env"
 if [ -f "$ENVFILE" ]; then

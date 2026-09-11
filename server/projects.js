@@ -9,9 +9,33 @@ const supervisor = require('./supervisor');
 const { assertSlug } = require('./slug');
 const { badRequest, notFound, conflict, HttpError } = require('./errors');
 
-/** Validate an optional working directory; returns an absolute, existing dir. */
-async function resolveCwd(value) {
-  if (value === undefined || value === null || value === '') return config.DEFAULT_CWD;
+/**
+ * Where project <slug> should run.
+ *
+ * Blank means "make one for me": <PROJECTS_ROOT>/<slug>, created if it is not
+ * there. An explicit path is still required to exist — creating an arbitrary
+ * directory tree because someone mistyped an absolute path is not a favour.
+ *
+ * The slug is already validated against ^[a-z0-9-]+$ by assertSlug, so it
+ * cannot climb out of PROJECTS_ROOT; the check below is belt and braces for
+ * the day that validation moves.
+ *
+ * @returns {Promise<string>} an absolute, existing directory
+ */
+async function resolveCwd(value, slug) {
+  if (value === undefined || value === null || value === '') {
+    const dir = path.join(config.PROJECTS_ROOT, slug);
+    const root = path.resolve(config.PROJECTS_ROOT);
+    if (dir !== path.join(root, path.basename(dir)) || path.dirname(dir) !== root) {
+      throw badRequest(`refusing to create a project directory outside ${root}`);
+    }
+    try {
+      await fsp.mkdir(dir, { recursive: true });
+    } catch (err) {
+      throw badRequest(`could not create ${dir}: ${err.code || err.message}`);
+    }
+    return dir;
+  }
   if (typeof value !== 'string') throw badRequest('cwd must be a string');
   const trimmed = value.trim();
   if (!path.isAbsolute(trimmed)) throw badRequest('cwd must be an absolute path');
@@ -62,7 +86,7 @@ async function getOne(rawSlug) {
 async function create(body) {
   if (!body || typeof body !== 'object') throw badRequest('expected a JSON object body');
   const slug = assertSlug(body.slug);
-  const cwd = await resolveCwd(body.cwd);
+  const cwd = await resolveCwd(body.cwd, slug);
 
   // Phase 1: reserve the slug + a port under the registry lock. Kept short so
   // we never hold the lock across a shell-out.

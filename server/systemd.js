@@ -8,8 +8,11 @@ const path = require('path');
 const { run } = require('./exec');
 
 const TEMPLATE_NAME = 'ttyd@.service';
+const MAIN_UNIT_NAME = 'webterm.service';
 const USER_UNIT_DIR = path.join(os.homedir(), '.config', 'systemd', 'user');
-const REPO_TEMPLATE = path.join(__dirname, '..', 'systemd', TEMPLATE_NAME);
+const REPO_ROOT = path.resolve(__dirname, '..');
+const REPO_TEMPLATE = path.join(REPO_ROOT, 'systemd', TEMPLATE_NAME);
+const REPO_MAIN_UNIT = path.join(REPO_ROOT, 'systemd', MAIN_UNIT_NAME);
 
 /**
  * `systemctl --user` talks to a per-user manager over D-Bus. A daemon started
@@ -69,6 +72,24 @@ function templateInstalled() {
   return fs.existsSync(path.join(USER_UNIT_DIR, TEMPLATE_NAME));
 }
 
+function mainUnitInstalled() {
+  return fs.existsSync(path.join(USER_UNIT_DIR, MAIN_UNIT_NAME));
+}
+
+/** Write a unit body into ~/.config/systemd/user/ atomically, then reload. */
+async function writeUnit(name, body, { force }) {
+  const dest = path.join(USER_UNIT_DIR, name);
+  const existed = fs.existsSync(dest);
+  if (existed && !force) return 'present';
+
+  await fsp.mkdir(USER_UNIT_DIR, { recursive: true, mode: 0o700 });
+  const tmp = `${dest}.${process.pid}.tmp`;
+  await fsp.writeFile(tmp, body, { mode: 0o644 });
+  await fsp.rename(tmp, dest);
+  await systemctl(['daemon-reload']);
+  return existed ? 'updated' : 'installed';
+}
+
 /**
  * Copy systemd/ttyd@.service into ~/.config/systemd/user/ and reload.
  * By default an existing file is left alone — it may have been hand-tuned
@@ -76,17 +97,63 @@ function templateInstalled() {
  * @returns {Promise<'installed'|'present'|'updated'>}
  */
 async function installTemplate({ force = false } = {}) {
-  const dest = path.join(USER_UNIT_DIR, TEMPLATE_NAME);
-  const existed = fs.existsSync(dest);
-  if (existed && !force) return 'present';
+  return writeUnit(TEMPLATE_NAME, await fsp.readFile(REPO_TEMPLATE, 'utf8'), { force });
+}
 
-  const body = await fsp.readFile(REPO_TEMPLATE, 'utf8');
-  await fsp.mkdir(USER_UNIT_DIR, { recursive: true, mode: 0o700 });
-  const tmp = `${dest}.${process.pid}.tmp`;
-  await fsp.writeFile(tmp, body, { mode: 0o644 });
-  await fsp.rename(tmp, dest);
-  await systemctl(['daemon-reload']);
-  return existed ? 'updated' : 'installed';
+/**
+ * Point the shipped webterm.service at wherever this checkout actually lives.
+ * The unit in git carries a placeholder path; nothing but the installer knows
+ * the real one, and a wrong WorkingDirectory fails at boot with a bare
+ * status=200/CHDIR that says nothing about the cause.
+ * @param {string} body   contents of systemd/webterm.service
+ * @param {string} root   absolute path of the checkout
+ */
+function renderMainUnit(body, root = REPO_ROOT) {
+  const abs = path.resolve(root);
+  if (!/^WorkingDirectory=/m.test(body)) {
+    throw new Error(`${MAIN_UNIT_NAME} has no WorkingDirectory= line to point at ${abs}`);
+  }
+  // systemd reads the *last* assignment, so rewrite in place rather than
+  // appending, and keep it to the one line: everything else is hand-editable.
+  return body.replace(/^WorkingDirectory=.*$/m, `WorkingDirectory=${abs}`);
+}
+
+/**
+ * Install webterm.service itself, with WorkingDirectory rewritten to this
+ * checkout. Same overwrite rule as the template.
+ * @returns {Promise<'installed'|'present'|'updated'>}
+ */
+async function installMainUnit({ force = false } = {}) {
+  const body = renderMainUnit(await fsp.readFile(REPO_MAIN_UNIT, 'utf8'));
+  return writeUnit(MAIN_UNIT_NAME, body, { force });
+}
+
+/**
+ * `systemctl --user enable webterm.service` — start on boot. Deliberately not
+ * `--now`: installing is not the same as taking over port 3000 from whatever
+ * the operator is running right now (scripts/smoke.sh, `npm start`).
+ *
+ * Only actually starts at boot if lingering is on; preflight already warns
+ * about that, and install.sh enables it.
+ * @returns {Promise<'enabled'|'already-enabled'>}
+ */
+async function enableAtBoot() {
+  const before = await systemctl(['is-enabled', MAIN_UNIT_NAME]);
+  if (before.stdout.trim() === 'enabled') return 'already-enabled';
+
+  const r = await systemctl(['enable', MAIN_UNIT_NAME]);
+  if (r.code !== 0) {
+    throw new Error(
+      `systemctl --user enable ${MAIN_UNIT_NAME} failed: ${(r.stderr || r.stdout).trim()}`
+    );
+  }
+  return 'enabled';
+}
+
+/** @returns {Promise<string>} enabled|disabled|static|not-found|... */
+async function bootEnabledState() {
+  const r = await systemctl(['is-enabled', MAIN_UNIT_NAME]);
+  return r.stdout.trim() || 'not-found';
 }
 
 /** @returns {Promise<string>} active|inactive|failed|activating|deactivating|unknown */
@@ -167,15 +234,23 @@ async function disableStop(slug) {
 
 module.exports = {
   TEMPLATE_NAME,
+  MAIN_UNIT_NAME,
   USER_UNIT_DIR,
+  REPO_ROOT,
   REPO_TEMPLATE,
+  REPO_MAIN_UNIT,
   unitName,
   systemctl,
   systemctlEnv,
   probe,
   lingerEnabled,
   templateInstalled,
+  mainUnitInstalled,
   installTemplate,
+  renderMainUnit,
+  installMainUnit,
+  enableAtBoot,
+  bootEnabledState,
   activeState,
   activeStates,
   journalTail,

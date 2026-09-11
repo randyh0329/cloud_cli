@@ -5,8 +5,11 @@ After=network.target
 
 [Service]
 Type=simple
-# Adjust if you cloned somewhere other than %h/Lab/cc_cloud.
-WorkingDirectory=%h/Lab/cc_cloud
+# Rewritten to the absolute path of this checkout by `npm run install-units`
+# (systemd.renderMainUnit). The placeholder below is deliberately obvious: a
+# wrong WorkingDirectory fails at boot as a bare status=200/CHDIR that names
+# nothing. If you install this file by hand, edit the line yourself.
+WorkingDirectory=/path/to/cloud_cli
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h/.local/bin
@@ -22,4 +25,8 @@ RestartSec=2s
 # session bus and PATH, so no filesystem/privilege sandboxing here either.
 
 [Install]
+# default.target is the user manager's boot target. For that manager to exist
+# at boot with nobody logged in, lingering must be on:
+#   sudo loginctl enable-linger $USER
+# install.sh does this; without it, "enabled" only takes effect at next login.
 WantedBy=default.target

@@ -101,11 +101,17 @@ class TtydTerminal {
       lineHeight: 1.2,
       scrollback: 10000,
       allowProposedApi: true,
+      // A TUI like Claude Code turns on mouse reporting, and from then on
+      // xterm hands drags to the application instead of selecting text. The
+      // escape hatch is Shift+drag — on macOS Option+drag, which only works
+      // with this flag on (it defaults to false).
+      macOptionClickForcesSelection: true,
       theme: THEME,
     });
     this.fitAddon = new window.FitAddon.FitAddon();
     this.term.loadAddon(this.fitAddon);
     this.term.open(this.mount);
+    this.#enableCopyOnCtrlC();
 
     this.term.onData((data) => this.#send(CMD.INPUT + data));
     this.term.onBinary((data) => this.#send(CMD.INPUT + data));
@@ -119,6 +125,37 @@ class TtydTerminal {
 
     this.fit();
     this.connect();
+  }
+
+  /**
+   * Make Ctrl+C copy when — and only when — there is a selection.
+   *
+   * Stock xterm maps Ctrl+C to ETX unconditionally and calls preventDefault, so
+   * the browser's copy command never fires and text can't be lifted out of a
+   * running program at all. Returning false from the custom handler leaves the
+   * event alone; the browser then raises `copy`, which xterm's own listener
+   * fills from the selection.
+   *
+   * With no selection the chord falls through to ETX, so interrupting a TUI is
+   * unaffected. The selection is dropped right after a copy so the *next*
+   * Ctrl+C interrupts rather than silently re-copying — in a Claude Code
+   * session that difference matters more than keeping the highlight.
+   */
+  #enableCopyOnCtrlC() {
+    const isMac = /Mac|iPhone|iPad/i.test(window.navigator.platform || window.navigator.userAgent);
+    this.term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== 'keydown' || ev.key !== 'c' && ev.key !== 'C') return true;
+      const chord = isMac ? ev.metaKey && !ev.ctrlKey : ev.ctrlKey && !ev.altKey && !ev.metaKey;
+      if (!chord || !this.term.hasSelection()) return true;
+      return false;
+    });
+    // Clearing inside the copy event itself would race xterm's own handler,
+    // which reads the selection synchronously to fill the clipboard.
+    this.mount.addEventListener('copy', () => {
+      setTimeout(() => {
+        if (this.term) this.term.clearSelection();
+      }, 0);
+    });
   }
 
   fit() {

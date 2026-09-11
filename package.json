@@ -7,9 +7,11 @@
   "scripts": {
     "start": "node server/index.js",
     "install-units": "node server/index.js --install-units",
+    "enable-boot": "node server/index.js --install-units --enable",
     "vendor": "cp node_modules/@xterm/xterm/lib/xterm.js node_modules/@xterm/xterm/css/xterm.css node_modules/@xterm/addon-fit/lib/addon-fit.js node_modules/@xterm/xterm/LICENSE public/vendor/ && mv public/vendor/LICENSE public/vendor/LICENSE.xterm",
     "test": "node --test 'test/*.test.js'",
-    "smoke": "scripts/smoke.sh"
+    "smoke": "scripts/smoke.sh",
+    "dev-mode": "scripts/dev-mode.sh"
   },
   "engines": {
     "node": ">=20"

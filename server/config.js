@@ -19,11 +19,25 @@ module.exports = {
   PORT_BASE: Number(process.env.WEBTERM_PORT_BASE || 7681),
   PORT_COUNT: Number(process.env.WEBTERM_PORT_COUNT || 100),
 
-  // The Node app itself. Bound to loopback only: cloudflared is the sole ingress.
-  LISTEN_HOST: '127.0.0.1',
+  // The Node app itself. Loopback by default: cloudflared is the sole ingress
+  // (spec §5). WEBTERM_BIND=0.0.0.0 exposes it directly for a browser test
+  // against the VM's public address — which index.js refuses to do unless
+  // WEBTERM_DEV_PASSWORD is also set.
+  LISTEN_HOST: process.env.WEBTERM_BIND || '127.0.0.1',
   LISTEN_PORT: Number(process.env.PORT || 3000),
 
+  // Dev-mode password gate, in place of Cloudflare Access. Empty = no gate.
+  DEV_PASSWORD: process.env.WEBTERM_DEV_PASSWORD || '',
+  DEV_SESSION_MS: Number(process.env.WEBTERM_DEV_SESSION_HOURS || 12) * 3600 * 1000,
+
   DEFAULT_CWD: os.homedir(),
+
+  // Where a project with no explicit cwd gets its own directory, created on
+  // demand as <root>/<slug>. Keeps each project's files apart instead of
+  // dropping every tmux session into $HOME.
+  PROJECTS_ROOT: path.resolve(
+    process.env.WEBTERM_PROJECTS_ROOT || path.join(os.homedir(), 'projects')
+  ),
 
   // What ttyd is told to bind with `-i`. ttyd documents -i as an interface
   // *name*, and whether the dotted-quad form is accepted depends on the

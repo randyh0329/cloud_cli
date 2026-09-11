@@ -64,7 +64,8 @@ body {
   gap: 7px;
   flex: 0 0 auto;
   max-width: 220px;
-  padding: 0 12px;
+  /* Less padding on the right: the close button supplies its own. */
+  padding: 0 6px 0 12px;
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
@@ -92,6 +93,42 @@ body {
 .tab .name {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Always visible — a close control you have to hover to discover is not one.
+   Muted by default and red only on its own hover, because it deletes the
+   project: the tmux session and whatever is running in it go with it. */
+.tab-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-left: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #4a5162;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.1s, background-color 0.1s;
+}
+
+.tab:hover .tab-close,
+.tab[aria-selected='true'] .tab-close {
+  color: var(--dim);
+}
+
+.tab-close:hover {
+  background: var(--bad);
+  color: #0d1017;
+}
+
+.tab-close:focus-visible {
+  color: var(--fg);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .dot {
@@ -289,6 +326,12 @@ dialog .hint {
   margin: 5px 0 14px;
   font-size: 11px;
   color: var(--dim);
+}
+
+dialog .hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--fg);
 }
 
 dialog .error {

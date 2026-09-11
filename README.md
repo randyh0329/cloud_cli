@@ -133,24 +133,80 @@ node scripts/smoke-browser.js --base http://127.0.0.1:3000 --slug my-app
 
 ### Install the systemd units
 
-`ttyd@.service` is copied into `~/.config/systemd/user/` automatically the first time you create
-a project, and an existing copy is never overwritten (so local edits stick). To install or
-re-sync it by hand:
+`install.sh` does all of this for you. By hand:
 
 ```bash
-npm run install-units          # force-copies systemd/ttyd@.service, then prints a preflight report
+npm run install-units          # sync both units, then print a preflight report
+npm run enable-boot            # the same, plus: start webterm.service at boot
 ```
 
-To run webterm itself as a user service, edit `WorkingDirectory` in `systemd/webterm.service` if
-you cloned elsewhere, then:
+Both force-copy `systemd/ttyd@.service` and `systemd/webterm.service` into `~/.config/systemd/user/`
+and reload the user manager. `webterm.service` is rewritten on the way in, so its `WorkingDirectory`
+is the absolute path of *this* checkout — the copy in git carries a `/path/to/cloud_cli` placeholder
+and will not run as-is. Re-run either command after moving the checkout.
+
+`ttyd@.service` is also copied in automatically the first time you create a project, and an
+existing copy is never overwritten then (so local edits stick).
+
+Neither command *starts* webterm — `scripts/smoke.sh` wants port 3000 to itself:
 
 ```bash
-install -Dm644 systemd/webterm.service ~/.config/systemd/user/webterm.service
-systemctl --user daemon-reload
-systemctl --user enable --now webterm.service
+systemctl --user start webterm.service
 systemctl --user status webterm.service
 journalctl --user -u webterm -f
 ```
+
+Starting at boot also needs lingering, or the user manager only exists while you are logged in:
+
+```bash
+sudo loginctl enable-linger "$USER"     # install.sh does this too
+systemctl --user is-enabled webterm.service    # -> enabled
+```
+
+### Dev mode: testing from a real browser, before the tunnel
+
+Spec §5 puts Cloudflare Access in front of everything and binds webterm to `127.0.0.1`. To try the
+real UI from a real browser before that exists, dev mode swaps Access for a password and lets the
+Node app bind a public address:
+
+```bash
+./scripts/dev-mode.sh on        # prompts for the password, restarts the service
+./scripts/dev-mode.sh status
+./scripts/dev-mode.sh off       # back to loopback-only, password removed
+```
+
+`on` writes `~/webterm/dev-mode.env` (0600, holds the password) and a `webterm.service.d/dev-mode.conf`
+drop-in that points at it. `off` deletes both and verifies the port is back on loopback. The drop-in
+is the whole footprint — the unit in git is never edited.
+
+| env var | effect |
+| --- | --- |
+| `WEBTERM_DEV_PASSWORD` | turns the gate on; empty means no gate at all |
+| `WEBTERM_BIND` | listen address, default `127.0.0.1` |
+| `WEBTERM_DEV_SESSION_HOURS` | session cookie lifetime, default 12 |
+
+The gate covers the UI, `/api/*`, `/term/<slug>/*` **and the WebSocket upgrade** — that last one is
+the socket the shell actually runs over, and Express never sees upgrade requests, so it is guarded
+separately in `server/index.js`. Sign-in issues an HMAC-signed, HttpOnly, SameSite=Strict cookie;
+changing the password invalidates every outstanding session. Five wrong passwords lock that source
+address out for a minute. ttyd itself never moves off `127.0.0.1` — only the Node proxy binds wider.
+
+**webterm refuses to start** if `WEBTERM_BIND` is non-loopback and no password is set. Nothing else
+here is a security boundary:
+
+- **No TLS.** The password and every keystroke of every session cross the network in clear text.
+- **One shared password in front of an interactive shell** is one guess away from remote
+  code execution as your user.
+- Firewall the port to your own address for the duration. On GCE:
+
+  ```bash
+  gcloud compute firewall-rules create webterm-dev-3000 \
+    --allow tcp:3000 --source-ranges "$(curl -s ifconfig.me)/32" --target-tags <your-instance-tag>
+  # and afterwards
+  gcloud compute firewall-rules delete webterm-dev-3000
+  ```
+
+Turn it off when the test is over. It is a testing affordance, not a deployment mode.
 
 ### First run (foreground)
 
@@ -273,8 +329,13 @@ curl -s localhost:3000/api/projects | jq
 curl -s -XDELETE localhost:3000/api/projects/my-app | jq
 ```
 
-`cwd` is an addition to the spec: without it every project's shell would start in `$HOME`. It
-must be an absolute path to an existing directory and defaults to `$HOME`.
+`cwd` is an addition to the spec: without it every project's shell would start in `$HOME`.
+
+- **Omitted or empty** — the project gets its own directory at `~/projects/<slug>`, created if it
+  is not already there. An existing one is reused untouched. Override the parent with
+  `WEBTERM_PROJECTS_ROOT`.
+- **Given** — must be an absolute path to a directory that already exists. An explicit path is
+  never created: `mkdir -p`-ing whatever someone typed turns a typo into a new directory tree.
 
 ## The `/term/<slug>/` proxy
 
@@ -340,8 +401,16 @@ Reconnects back off exponentially to 15 s.
 function-key combination belongs to the program inside the terminal, and Claude Code uses a lot
 of them.
 
-Delete is right-click (or a 600 ms long-press on touch) on a tab, then a confirmation, then
-`DELETE /api/projects/:slug`.
+Delete is the tab's `×`, right-click, or a 600 ms long-press on touch — then a confirmation, then
+`DELETE /api/projects/:slug`. All three routes are the same destructive operation: the tmux session
+and everything running in it go too, which is why the `×` is muted until you hover it.
+
+**Copying text out of a TUI.** Claude Code, `vim` and `less` turn on mouse reporting, and from that
+point xterm hands drags to the program instead of selecting text. Hold **Shift** while dragging
+(**Option** on macOS) to force a local selection, then `Ctrl+C` (`Cmd+C`) to copy it. With no
+selection, `Ctrl+C` is an interrupt as usual — stock xterm.js sends `ETX` unconditionally and
+swallows the browser's copy, so `ttyd-client.js` installs a key handler that only steps in when
+there is something to copy, and drops the selection afterwards so the next `Ctrl+C` interrupts.
 
 ### Testing it
 

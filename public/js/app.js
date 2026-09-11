@@ -50,6 +50,12 @@ async function api(method, path, body) {
   } catch {
     data = null;
   }
+  // Dev-mode password gate only: the session expired mid-session, so send the
+  // browser to the form instead of surfacing "401" as a project error.
+  if (res.status === 401) {
+    location.href = `/login?next=${encodeURIComponent(location.pathname + location.search)}`;
+    await new Promise(() => {}); // navigation is in flight; never resolve
+  }
   if (!res.ok) {
     const err = new Error((data && data.error) || `${res.status} ${res.statusText}`);
     err.status = res.status;
@@ -86,13 +92,15 @@ function describe(err) {
 function buildTab(project) {
   const slug = project.slug;
 
-  const tab = document.createElement('button');
-  tab.type = 'button';
+  // A div, not a button: the close control below is a real <button>, and a
+  // button inside a button is invalid and behaves unpredictably.
+  const tab = document.createElement('div');
   tab.className = 'tab';
   tab.setAttribute('role', 'tab');
+  tab.tabIndex = 0;
   tab.dataset.slug = slug;
   tab.setAttribute('aria-selected', 'false');
-  tab.title = `${slug} — ${project.cwd}\nRight-click (or long-press) to delete`;
+  tab.title = `${slug} — ${project.cwd}\nClose (×), right-click or long-press to delete`;
 
   const dot = document.createElement('span');
   dot.className = 'dot';
@@ -100,9 +108,29 @@ function buildTab(project) {
   const name = document.createElement('span');
   name.className = 'name';
   name.textContent = slug;
-  tab.append(dot, name);
+
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'tab-close';
+  close.textContent = '×';
+  close.title = `Delete ${slug}`;
+  close.setAttribute('aria-label', `Delete project ${slug}`);
+  close.addEventListener('click', (ev) => {
+    // Without this the click also activates the tab underneath, so the
+    // confirmation would appear over a tab that just took focus.
+    ev.stopPropagation();
+    confirmDelete(slug);
+  });
+
+  tab.append(dot, name, close);
 
   tab.addEventListener('click', () => activate(slug));
+  // The div lost the button's implicit keyboard activation; put it back.
+  tab.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    activate(slug);
+  });
 
   // Delete: right-click on a pointer device, long-press on a touch one (spec §3.4).
   tab.addEventListener('contextmenu', (ev) => {
@@ -176,7 +204,7 @@ function onTermState(slug, state, detail) {
   const entry = tabs.get(slug);
   if (!entry) return;
   if (state === 'title') {
-    entry.tab.title = `${slug} — ${detail}\nRight-click (or long-press) to delete`;
+    entry.tab.title = `${slug} — ${detail}\nClose (×), right-click or long-press to delete`;
     return;
   }
   entry.dot.dataset.state = state;

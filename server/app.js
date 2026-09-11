@@ -4,6 +4,7 @@ const path = require('path');
 const express = require('express');
 
 const config = require('./config');
+const auth = require('./auth');
 const apiRoutes = require('./routes');
 const proxy = require('./proxy');
 const { HttpError, notFound } = require('./errors');
@@ -14,6 +15,12 @@ function createApp() {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 'loopback');
+
+  // Before everything, including the proxy: /term/<slug>/ is a terminal, so an
+  // auth check mounted after it would be decorative. No-op unless
+  // WEBTERM_DEV_PASSWORD is set.
+  app.use(auth.middleware);
+  app.post('/logout', auth.logout);
 
   // The proxy must come before express.json(): the body parser would consume
   // the request stream, leaving nothing to forward to ttyd. It only claims

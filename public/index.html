@@ -48,9 +48,12 @@
           autocomplete="off"
           autocapitalize="off"
           spellcheck="false"
-          placeholder="$HOME"
+          placeholder="~/projects/&lt;slug&gt;"
         />
-        <p class="hint">Absolute path to an existing directory. Defaults to your home directory.</p>
+        <p class="hint">
+          Leave blank and <code>~/projects/&lt;slug&gt;</code> is created for you. An absolute path
+          you type must already exist.
+        </p>
 
         <p id="f-error" class="error" hidden></p>
         <menu>

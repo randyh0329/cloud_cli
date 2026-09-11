@@ -25,6 +25,8 @@ const haveChrome = fs.existsSync(CHROME);
 
 process.env.WEBTERM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-fe-'));
 process.env.WEBTERM_STUB_SUPERVISOR = '1';
+// The "+ New Project" test posts a blank cwd, which now creates a directory.
+process.env.WEBTERM_PROJECTS_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'webterm-fe-proj-'));
 // Keep any tmux the fake backend might start away from the user's own server.
 process.env.TMUX_TMPDIR = process.env.WEBTERM_HOME;
 
@@ -224,6 +226,99 @@ describe('frontend', { skip: haveChrome ? false : `Chrome not found at ${CHROME}
     );
   });
 
+  /**
+   * A TUI (Claude Code, vim, less) turns on mouse reporting, and from that
+   * moment xterm forwards drags to the application instead of selecting — so
+   * text cannot be copied out of it by dragging. Shift+drag is the escape
+   * hatch, and Ctrl+C only reaches the clipboard because of the custom key
+   * handler in ttyd-client.js; stock xterm sends ETX and swallows the event.
+   */
+  describe('copying out of a program that has grabbed the mouse', () => {
+    const mouseTracking = (on) =>
+      page.evaluate(
+        (o) =>
+          window.webterm.tabs
+            .get('alpha')
+            .term.term.write(o ? '\x1b[?1000h\x1b[?1006h' : '\x1b[?1000l\x1b[?1006l'),
+        on
+      );
+
+    const drag = async ({ shift }) => {
+      const box = await page.evaluate(() => {
+        const r = window.webterm.tabs
+          .get('alpha')
+          .pane.querySelector('.xterm-screen')
+          .getBoundingClientRect();
+        return { x: r.x, y: r.y };
+      });
+      await page.evaluate(() => window.webterm.tabs.get('alpha').term.term.clearSelection());
+      if (shift) await page.keyboard.down('Shift');
+      await page.mouse.move(box.x + 15, box.y + 8);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 260, box.y + 8, { steps: 10 });
+      await page.mouse.up();
+      if (shift) await page.keyboard.up('Shift');
+      return page.evaluate(() => window.webterm.tabs.get('alpha').term.term.hasSelection());
+    };
+
+    const ctrlC = async () => {
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyC');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 200));
+    };
+
+    before(async () => {
+      await page.click('.tab[data-slug="alpha"]');
+      await page.evaluate(() => {
+        window.__copies = 0;
+        document.addEventListener('copy', () => (window.__copies += 1), true);
+      });
+      await mouseTracking(true);
+    });
+
+    after(() => mouseTracking(false));
+
+    test('a plain drag selects nothing once the app owns the mouse', async () => {
+      assert.equal(await drag({ shift: false }), false);
+    });
+
+    test('Shift+drag still selects, and Ctrl+C copies it', async () => {
+      assert.equal(await drag({ shift: true }), true, 'Shift forces a local selection');
+      const selected = await page.evaluate(() =>
+        window.webterm.tabs.get('alpha').term.term.getSelection()
+      );
+      assert.ok(selected.trim().length > 0);
+
+      await page.evaluate(() => (window.__copies = 0));
+      await ctrlC();
+      assert.equal(await page.evaluate(() => window.__copies), 1, 'the browser copy event fired');
+      assert.equal(
+        await page.evaluate(() => window.webterm.tabs.get('alpha').term.term.hasSelection()),
+        false,
+        'the selection is dropped so the next Ctrl+C is an interrupt again'
+      );
+    });
+
+    test('Ctrl+C with no selection is still an interrupt', async () => {
+      await page.evaluate(() => window.webterm.tabs.get('alpha').term.term.clearSelection());
+      const before = await bufferText('alpha');
+      await page.keyboard.type('sleep 20');
+      await ctrlC();
+      await page.waitForFunction(
+        (prev) => {
+          const b = window.webterm.tabs.get('alpha').term.term.buffer.active;
+          let s = '';
+          for (let i = 0; i < b.length; i += 1) s += `${b.getLine(i)?.translateToString(true) || ''}\n`;
+          return s.length > prev.length && s.includes('^C');
+        },
+        { timeout: 10000 },
+        before
+      );
+      assert.match(await bufferText('alpha'), /\^C/);
+    });
+  });
+
   test('switching tabs hides the pane but keeps the socket open', async () => {
     await page.click('.tab[data-slug="beta"]');
     await page.waitForFunction(
@@ -356,6 +451,49 @@ describe('frontend', { skip: haveChrome ? false : `Chrome not found at ${CHROME}
     await page.waitForFunction(() => !document.querySelector('#f-error').hidden);
     assert.match(await page.$eval('#f-error', (el) => el.textContent), /lowercase letters/);
     await page.evaluate(() => document.querySelector('#new-dialog').close('cancel'));
+  });
+
+  describe('the tab close button', () => {
+    before(async () => {
+      await fetch(`${base}/api/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ slug: 'closeme' }),
+      });
+      await page.evaluate(() => window.webterm.reload());
+      await page.waitForFunction(() => window.webterm.tabs.has('closeme'), { timeout: 15000 });
+      // Make something else the active tab, so "does not activate" is testable.
+      await page.click('.tab[data-slug="alpha"]');
+    });
+
+    test('every tab has one', async () => {
+      const tabs = await page.$$eval('.tab', (els) => els.length);
+      const buttons = await page.$$eval('.tab .tab-close', (els) => els.length);
+      assert.equal(buttons, tabs);
+    });
+
+    test('declining leaves the project alone, and does not activate the tab', async () => {
+      const activeBefore = await page.evaluate(() => window.webterm.activeSlug());
+      page.once('dialog', (d) => d.dismiss());
+      await page.click('.tab[data-slug="closeme"] .tab-close');
+      await new Promise((r) => setTimeout(r, 300));
+
+      assert.equal((await fetch(`${base}/api/projects/closeme`)).status, 200);
+      assert.ok(await page.$('.tab[data-slug="closeme"]'));
+      assert.equal(
+        await page.evaluate(() => window.webterm.activeSlug()),
+        activeBefore,
+        'the click was stopped before it reached the tab underneath'
+      );
+    });
+
+    test('accepting deletes the project, tab and pane', async () => {
+      page.once('dialog', (d) => d.accept());
+      await page.click('.tab[data-slug="closeme"] .tab-close');
+      await page.waitForFunction(() => !window.webterm.tabs.has('closeme'), { timeout: 15000 });
+      assert.equal((await fetch(`${base}/api/projects/closeme`)).status, 404);
+      assert.equal(await page.$('.pane[data-slug="closeme"]'), null);
+    });
   });
 
   test('right-clicking a tab deletes the project after confirmation', async () => {
