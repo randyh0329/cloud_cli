@@ -596,3 +596,7 @@ webterm logs a warning when it falls back. Confirm lingering is on and `systemd-
 
 Multi-user support, screenshot retention/cleanup, auto-starting Claude Code inside new sessions,
 mobile paste UX, and dynamic Cloudflare ingress management.
+
+## License
+
+MIT — see [LICENSE](./LICENSE). The vendored xterm.js in `public/vendor/` is MIT-licensed by its authors; see `public/vendor/LICENSE.xterm`.
