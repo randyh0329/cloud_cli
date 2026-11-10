@@ -15,9 +15,11 @@ Browser ──wss/https──► Cloudflare Tunnel ──► Cloudflare Access �
                                                                                          └─ tmux session <slug>
 ```
 
-**Auth is Cloudflare Access and nothing else.** There is no in-app login. `ttyd` runs with
-`--no-auth`, and both `ttyd` and webterm bind to `127.0.0.1`, so cloudflared is the only thing
-that can reach them. Lock the Access policy to your own identity *before* the tunnel is live.
+**Auth is Cloudflare Access.** There is no in-app login. `ttyd` runs with `--no-auth`, and both
+`ttyd` and webterm bind to `127.0.0.1`, so cloudflared is the only thing that can reach them. Lock
+the Access policy to your own identity *before* the tunnel is live, and turn on
+[Access token verification](#verifying-cloudflare-access-tokens) so a missing or misconfigured
+Access application fails closed instead of serving a shell.
 
 ## Status
 
@@ -35,7 +37,7 @@ that can reach them. Lock the Access policy to your own identity *before* the tu
 git clone https://github.com/randyh0329/cloud_cli.git ~/webterm-src
 cd ~/webterm-src
 ./install.sh          # tmux, Node LTS, ttyd >= 1.7, headless Chrome, linger, npm install
-npm test              # 80 unit + browser tests
+npm test              # 140 unit + browser tests
 ./scripts/smoke.sh    # end-to-end against real ttyd, systemd --user and tmux
 ```
 
@@ -89,7 +91,7 @@ ls -d /run/user/$(id -u)                        # must now exist
 git clone https://github.com/randyh0329/cloud_cli.git ~/Lab/cc_cloud
 cd ~/Lab/cc_cloud
 npm install
-npm test                       # 80 tests; needs tmux + python3, does not need ttyd
+npm test                       # 140 tests; needs tmux + python3, does not need ttyd
 ```
 
 `npm test` includes a browser test that drives the real UI in headless Chrome. It looks for
@@ -254,8 +256,53 @@ No `originRequest` tweaks are needed for WebSockets — cloudflared proxies the 
 If you put a long-idle terminal behind it, consider raising Cloudflare's idle timeout.
 
 Then, in Cloudflare Zero Trust → Access → Applications, add a self-hosted app for
-`term.example.com` with a policy allowing exactly your email. Verify you get the Access login
-screen from a logged-out browser before you rely on it.
+`term.example.com` with a policy allowing exactly your email. Prefer an identity provider with
+MFA over one-time email PINs, keep the session short, and in the app's cookie settings turn on
+HttpOnly with SameSite `Lax` or `Strict`. Verify you get the Access login screen from a
+logged-out browser before you rely on it.
+
+### Verifying Cloudflare Access tokens
+
+Access is configured in your Cloudflare account, not on this host. Delete the application, typo
+its domain, or widen a policy, and cloudflared forwards unauthenticated requests to a shell.
+Every request Access lets through carries a signed JWT in `Cf-Access-Jwt-Assertion`. Tell
+webterm to verify it:
+
+```bash
+# in webterm.service (or exported before npm start)
+Environment=WEBTERM_ACCESS_TEAM=myteam            # myteam.cloudflareaccess.com
+Environment=WEBTERM_ACCESS_AUD=<AUD tag>          # Access app → Overview → Application Audience (AUD) tag
+```
+
+With both set, the UI, `/api/*`, `/term/<slug>/*` and the WebSocket upgrade all require a token
+signed by your team's keys for that audience: RS256 only, with `iss`, `aud`, `exp` and `nbf`
+checked. Keys come from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` and are
+refreshed on rotation. If they can't be fetched, every request is refused. There is no loopback
+exemption, because cloudflared itself connects from loopback. Once this is on, a plain
+`curl localhost:3000/api/...` gets a 403. Setting only one of the two variables is a startup error.
+The boot banner says which auth is active, and warns when tokens aren't verified.
+
+You can also (or instead) turn on **Protect with Access** on the tunnel's public hostname, which
+makes cloudflared itself validate the token before forwarding.
+
+### Browser-side protections
+
+Because Access authenticates the *browser*, any request that browser sends carries a valid
+session, including requests another site makes it send. So:
+
+- **State-changing requests must be same-origin.** A non-GET request whose `Origin` doesn't match
+  its `Host` (or that a browser marks `Sec-Fetch-Site: cross-site`) gets a 403. Without this, any
+  page you visit could POST a multipart form to `/api/upload`, a CORS "simple" request with no
+  preflight. Clients that send neither header (curl, scripts) are unaffected.
+- **WebSocket upgrades must be same-origin.** WebSockets aren't covered by CORS. webterm checks
+  `Origin` on every upgrade, and ttyd runs with `-O` to check it again.
+- **No framing.** `X-Frame-Options: DENY` and `frame-ancestors 'none'`, so a hostile page can't
+  trick a click onto a tab's ×. The UI also gets a CSP (`script-src 'self'`), `nosniff` and
+  `Referrer-Policy: no-referrer`.
+
+**Upgrading an existing install:** `ttyd@.service` is never overwritten when a project is created,
+so run `npm run install-units` once to pick up `-O`, then restart each project's unit
+(`systemctl --user restart 'ttyd@*.service'`). tmux sessions survive the restart.
 
 ## Configuration
 
@@ -269,6 +316,8 @@ Environment variables, all optional:
 | `WEBTERM_PORT_COUNT` | `100` | Pool size, i.e. maximum concurrent projects |
 | `WEBTERM_MAX_UPLOAD_BYTES` | `12582912` | Largest pasted image accepted (12 MB) |
 | `WEBTERM_TTYD_IFACE` | `127.0.0.1` | What ttyd is told to bind with `-i`. Set to `lo` if your ttyd rejects the address form — see below |
+| `WEBTERM_ACCESS_TEAM` | unset | Cloudflare Access team (`myteam` or `myteam.cloudflareaccess.com`). With `WEBTERM_ACCESS_AUD`, turns on JWT verification |
+| `WEBTERM_ACCESS_AUD` | unset | Access application AUD tag(s), comma-separated |
 | `WEBTERM_STUB_SUPERVISOR` | unset | `1` skips all tmux/systemd side effects (frontend dev, tests) |
 
 State layout:
@@ -485,6 +534,15 @@ Each of these was flagged before implementation:
     saved but `send-keys` failed there is no honest 2xx-or-4xx answer, and returning an error would
     imply the upload was lost. The response carries `injected: false` and a `warning` instead, and
     the toast turns red.
+12. **ttyd gets `-O` (check-origin).** Not in spec §3.1. Behind Access, the browser's session
+    rides along on WebSockets another site opens, and CORS doesn't apply to WebSockets.
+13. **Optional Access JWT verification** (`WEBTERM_ACCESS_TEAM`/`_AUD`). Spec §5 makes Access the
+    only auth layer. Verifying its token on the host means a Cloudflare-side misconfiguration
+    fails closed.
+14. **Same-origin check on unsafe methods and upgrades, plus security headers.** Spec §5 doesn't
+    cover cross-site requests or framing. See "Browser-side protections".
+15. **`install.sh` pins ttyd** to a release (`TTYD_VERSION`, default 1.7.7) and checks it against
+    that release's `SHA256SUMS`, instead of taking `latest` unchecked.
 
 ## Troubleshooting
 
@@ -519,6 +577,17 @@ image copy — "copy image" in a page, a screenshot tool, ⌘⇧4 on macOS. Copy
 manager yields a file reference, not `image/*`, and falls through to a normal text paste. If a red
 toast appears instead, it carries the reason. Over the tunnel this needs HTTPS, which Cloudflare
 already provides; on a plain-HTTP origin some browsers withhold clipboard image data.
+
+**403 `Cloudflare Access token missing or invalid`.** Access verification is on, and either the
+request didn't come through Access (e.g. local curl) or the team/AUD don't match the application.
+The webterm log names the reason (`wrong audience`, `expired`, `could not load Access keys`…).
+
+**403 `cross-origin request refused`.** A POST/DELETE or WebSocket arrived with an `Origin` that
+doesn't match `Host`. Something between the browser and webterm is rewriting `Host` (e.g. a
+tunnel `httpHostHeader` override). Remove the rewrite rather than the check.
+
+**The page loads but terminals never connect, after upgrading.** Same cause as above, one hop in:
+ttyd's `-O` compares `Origin` with `Host`.
 
 **Sessions died when I restarted webterm.** The transient scope wasn't available at the time —
 webterm logs a warning when it falls back. Confirm lingering is on and `systemd-run` is present.

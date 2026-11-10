@@ -33,6 +33,9 @@ done
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NODE_MIN_MAJOR=20
 TTYD_MIN="1.7.0"
+# Pinned release for the binary fallback, verified against its SHA256SUMS.
+# Override with TTYD_VERSION=x.y.z ./install.sh after checking the release.
+TTYD_VERSION="${TTYD_VERSION:-1.7.7}"
 
 # ---------------------------------------------------------------- output ----
 if [ -t 1 ]; then B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; N=$'\033[0m'
@@ -123,10 +126,19 @@ else
       ok "installed ttyd $(ttyd_version) from apt (candidate was $CAND)"
     else
       [ -n "$CAND" ] && warn "apt only offers ttyd $CAND, which has no -b/--base-path"
-      URL="https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.${TTYD_ARCH}"
-      echo "  downloading $URL"
-      curl -fsSL -o "$TMP/ttyd" "$URL" || die "could not download the ttyd release binary for $TTYD_ARCH"
-      sudo install -m 0755 "$TMP/ttyd" /usr/local/bin/ttyd
+      # A pinned version, checked against the release's own SHA256SUMS — same
+      # caveat as Node above: it proves the download is intact and is the file
+      # that release lists, not that the upstream project is trustworthy.
+      REL="https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}"
+      echo "  downloading $REL/ttyd.${TTYD_ARCH}"
+      curl -fsSL -o "$TMP/ttyd.${TTYD_ARCH}" "$REL/ttyd.${TTYD_ARCH}" \
+        || die "could not download the ttyd ${TTYD_VERSION} release binary for $TTYD_ARCH"
+      curl -fsSL -o "$TMP/ttyd.SHA256SUMS" "$REL/SHA256SUMS" \
+        || die "could not download SHA256SUMS for ttyd ${TTYD_VERSION}"
+      ( cd "$TMP" && grep " ttyd.${TTYD_ARCH}\$" ttyd.SHA256SUMS | sha256sum -c - >/dev/null ) \
+        || die "ttyd.${TTYD_ARCH} does not match the published SHA256 for ${TTYD_VERSION} — not installing it"
+      ok "ttyd ${TTYD_VERSION} checksum verified"
+      sudo install -m 0755 "$TMP/ttyd.${TTYD_ARCH}" /usr/local/bin/ttyd
       hash -r
       ver_ge "$(ttyd_version)" "$TTYD_MIN" || die "installed ttyd reports $(ttyd_version), need >= $TTYD_MIN"
       ok "installed ttyd $(ttyd_version) to /usr/local/bin"

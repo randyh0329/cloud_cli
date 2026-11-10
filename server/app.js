@@ -4,7 +4,9 @@ const path = require('path');
 const express = require('express');
 
 const config = require('./config');
+const access = require('./access');
 const auth = require('./auth');
+const guard = require('./guard');
 const apiRoutes = require('./routes');
 const proxy = require('./proxy');
 const { HttpError, notFound } = require('./errors');
@@ -17,9 +19,14 @@ function createApp() {
   app.set('trust proxy', 'loopback');
 
   // Before everything, including the proxy: /term/<slug>/ is a terminal, so an
-  // auth check mounted after it would be decorative. No-op unless
-  // WEBTERM_DEV_PASSWORD is set.
+  // auth check mounted after it would be decorative.
+  //   access — Cloudflare Access JWT; no-op unless WEBTERM_ACCESS_TEAM/_AUD are set
+  //   auth   — dev-mode password; no-op unless WEBTERM_DEV_PASSWORD is set
+  //   guard  — security headers + same-origin check on state-changing requests
+  // The WebSocket upgrade path in index.js runs the same three, in the same order.
+  app.use(access.middleware);
   app.use(auth.middleware);
+  app.use(guard.middleware);
   app.post('/logout', auth.logout);
 
   // The proxy must come before express.json(): the body parser would consume
