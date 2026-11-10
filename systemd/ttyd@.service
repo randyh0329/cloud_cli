@@ -21,7 +21,7 @@ EnvironmentFile=%h/webterm/env/%i.env
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h/.local/bin
 Environment=TERM=xterm-256color
 
-# spec §3.1 command, with two additions:
+# spec §3.1 command, with three additions:
 #   -i <iface>    spec §5 requires ttyd to be loopback-only; ttyd's default is
 #                 to bind every interface. The Node proxy is the only client.
 #                 ttyd documents -i as an interface *name*, and whether it also
@@ -32,13 +32,19 @@ Environment=TERM=xterm-256color
 #   -b /term/%i   ttyd is mounted behind the proxy at /term/<slug>/, so it must
 #                 emit its /token and /ws URLs under that prefix. Without -b it
 #                 emits /-rooted URLs that 404 at the proxy.
+#   -O            check-origin: refuse a WebSocket whose Origin does not match
+#                 its Host. Every browser request arrives with a valid Access
+#                 session, including ones another site makes it send, and
+#                 WebSockets are not covered by CORS — without -O any page the
+#                 user visits could try to open this shell. webterm's proxy keeps
+#                 the browser's Host header, so same-origin sockets still match.
 # Also present, from the spec:
-#   -W            writable: honour client-initiated resize
+#   -W            writable: since ttyd 1.7 the terminal is read-only without it
 #   tmux new -A   attach if the session exists, so ttyd and webterm can both
 #                 restart without disturbing the running shell.
 # ${VAR} (braced) expands to exactly one argument, so a cwd containing spaces
 # is passed through intact.
-ExecStart=/usr/bin/env ttyd -p ${WEBTERM_PORT} -i ${WEBTERM_IFACE} -b /term/%i -W tmux new -A -s %i -c ${WEBTERM_CWD}
+ExecStart=/usr/bin/env ttyd -p ${WEBTERM_PORT} -i ${WEBTERM_IFACE} -b /term/%i -W -O tmux new -A -s %i -c ${WEBTERM_CWD}
 
 Restart=on-failure
 RestartSec=2s

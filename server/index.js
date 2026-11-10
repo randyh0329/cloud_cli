@@ -1,7 +1,11 @@
 'use strict';
 
 const config = require('./config');
+const net = require('net');
+
+const access = require('./access');
 const auth = require('./auth');
+const guard = require('./guard');
 const registry = require('./registry');
 const supervisor = require('./supervisor');
 const systemd = require('./systemd');
@@ -41,8 +45,17 @@ async function installUnitsAndExit() {
   process.exit(pf.ok ? 0 : 1);
 }
 
-const isLoopback = (host) =>
-  host === '127.0.0.1' || host === '::1' || host === 'localhost' || /^127\./.test(host);
+/**
+ * Literal loopback addresses only (plus "localhost"). A hostname is not
+ * resolved here, so "127.example.com" must not pass a prefix test.
+ */
+function isLoopback(host) {
+  if (host === 'localhost') return true;
+  const kind = net.isIP(host);
+  if (kind === 4) return host.startsWith('127.');
+  if (kind === 6) return host === '::1';
+  return false;
+}
 
 /**
  * The one interlock that matters: binding anything but loopback puts a shell
@@ -61,10 +74,28 @@ function assertBindIsSafe() {
   process.exit(1);
 }
 
+/** Half an Access configuration would silently verify nothing — refuse it. */
+function assertAccessConfig() {
+  if (!access.halfConfigured()) return;
+  console.error(
+    'fatal: set both WEBTERM_ACCESS_TEAM and WEBTERM_ACCESS_AUD to verify Cloudflare ' +
+      'Access tokens, or neither.'
+  );
+  process.exit(1);
+}
+
 async function main() {
   if (process.argv.includes('--install-units')) return installUnitsAndExit();
 
   assertBindIsSafe();
+  assertAccessConfig();
+  if (access.enabled()) {
+    // Warm the key cache; on failure requests are refused (fail closed) and the
+    // fetch is retried on demand.
+    await access.refreshKeys({ force: true }).catch((err) => {
+      console.error(`  ERROR  could not load Cloudflare Access keys from ${access.certsUrl()}: ${err.message}`);
+    });
+  }
 
   const loaded = await registry.init();
   const app = createApp();
@@ -77,7 +108,17 @@ async function main() {
     console.log(`webterm listening on http://${config.LISTEN_HOST}:${config.LISTEN_PORT}`);
     console.log(`  state dir:       ${config.WEBTERM_HOME}`);
     console.log(`  projects loaded: ${Object.keys(loaded).length}`);
-    console.log(`  auth:            ${auth.enabled() ? 'dev password' : 'none (loopback only)'}`);
+    const methods = [
+      access.enabled() && 'Cloudflare Access JWT verified',
+      auth.enabled() && 'dev password',
+    ].filter(Boolean);
+    console.log(`  auth:            ${methods.join(' + ') || 'none in-app (relies on Cloudflare Access in front)'}`);
+    if (!access.enabled() && !auth.enabled()) {
+      console.warn(
+        '  warn   Access tokens are not verified. Set WEBTERM_ACCESS_TEAM and WEBTERM_ACCESS_AUD\n' +
+          '         so a missing or misconfigured Access application fails closed.'
+      );
+    }
     if (!isLoopback(config.LISTEN_HOST)) {
       console.warn(
         `  WARNING: bound to ${config.LISTEN_HOST} — this shell is reachable from the network,\n` +
@@ -103,8 +144,12 @@ async function main() {
     }
   });
 
-  server.on('upgrade', (req, socket, head) => {
+  // Same gates, same order, as the Express path in app.js.
+  server.on('upgrade', async (req, socket, head) => {
+    socket.on('error', () => {});
+    if (!(await access.authorizeUpgrade(req, socket))) return;
     if (!auth.authorizeUpgrade(req, socket)) return;
+    if (!guard.authorizeUpgrade(req, socket)) return;
     proxy.handleUpgrade(req, socket, head);
   });
 

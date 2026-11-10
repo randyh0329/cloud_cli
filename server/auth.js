@@ -129,7 +129,15 @@ function lockedFor(ip, now = Date.now()) {
   return a.until - now;
 }
 
+// Bound the table: one entry per source address that ever failed would
+// otherwise grow without limit under a spray from many addresses.
+const MAX_TRACKED = 10_000;
+
 function noteFailure(ip, now = Date.now()) {
+  if (attempts.size >= MAX_TRACKED && !attempts.has(ip)) {
+    for (const [k, v] of attempts) if (v.until <= now) attempts.delete(k);
+    if (attempts.size >= MAX_TRACKED) attempts.delete(attempts.keys().next().value);
+  }
   const a = attempts.get(ip) || { fails: 0, until: 0 };
   a.fails += 1;
   if (a.fails >= MAX_FAILS) {

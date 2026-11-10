@@ -90,7 +90,9 @@ async function main() {
 
   // 2. Upgrade through the proxy. Bad subprotocol handling shows up right here.
   const wsUrl = `${PREFIX.replace(/^http/, 'ws')}/ws`;
-  socket = new WebSocket(wsUrl, ['tty'], { perMessageDeflate: false });
+  // Send an Origin a browser would: webterm's guard and ttyd's -O both refuse
+  // a WebSocket whose Origin does not match its Host.
+  socket = new WebSocket(wsUrl, ['tty'], { perMessageDeflate: false, origin: new URL(BASE).origin });
   socket.binaryType = 'nodebuffer';
 
   await new Promise((resolve, reject) => {

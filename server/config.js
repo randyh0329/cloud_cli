@@ -3,6 +3,13 @@
 const os = require('os');
 const path = require('path');
 
+/** "myteam" | "myteam.cloudflareaccess.com" | "https://myteam…/" -> "myteam.cloudflareaccess.com" */
+function normaliseTeam(value) {
+  const v = String(value).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  if (!v) return '';
+  return v.includes('.') ? v : `${v}.cloudflareaccess.com`;
+}
+
 // Root for all mutable state this app owns. Override with WEBTERM_HOME for tests.
 const WEBTERM_HOME = path.resolve(
   process.env.WEBTERM_HOME || path.join(os.homedir(), 'webterm')
@@ -29,6 +36,19 @@ module.exports = {
   // Dev-mode password gate, in place of Cloudflare Access. Empty = no gate.
   DEV_PASSWORD: process.env.WEBTERM_DEV_PASSWORD || '',
   DEV_SESSION_MS: Number(process.env.WEBTERM_DEV_SESSION_HOURS || 12) * 3600 * 1000,
+
+  // Cloudflare Access JWT verification (defense in depth behind the tunnel).
+  // Set both to make webterm verify Cf-Access-Jwt-Assertion on every request
+  // and WebSocket upgrade, so a missing or misconfigured Access application
+  // fails closed instead of serving a shell. Empty = not verified.
+  //   WEBTERM_ACCESS_TEAM  e.g. "myteam" or "myteam.cloudflareaccess.com"
+  //   WEBTERM_ACCESS_AUD   the Access application's AUD tag (comma-separated
+  //                        if more than one application fronts this origin)
+  ACCESS_TEAM_DOMAIN: normaliseTeam(process.env.WEBTERM_ACCESS_TEAM || ''),
+  ACCESS_AUD: (process.env.WEBTERM_ACCESS_AUD || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
 
   DEFAULT_CWD: os.homedir(),
 

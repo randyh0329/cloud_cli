@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `127.0.0.1:3000` fronts N per-project `ttyd` instances (one `systemd --user` template unit each),
 which in turn front N `tmux` sessions. The browser is a tab manager over those sessions.
 Auth is Cloudflare Access in front of a tunnel; there is no in-app login (except the dev-mode gate,
-below).
+below). webterm can verify the Access JWT itself (`server/access.js`, opt-in via
+`WEBTERM_ACCESS_TEAM`/`_AUD`).
 
 `spec.md` is the original contract. `README.md` is the user-facing manual and carries a
 **"Deviations from spec.md"** section — when you deliberately depart from the spec, add a numbered
@@ -44,14 +45,18 @@ node scripts/fake-ttyd.js testproj <port>    # speaks ttyd's wire protocol over 
 
 ### Request pipeline (`server/app.js`) — order is load-bearing
 
-`auth.middleware` → `proxy.httpMiddleware` → `express.json()` → `/api` router → static `public/`.
+`access.middleware` → `auth.middleware` → `guard.middleware` → `proxy.httpMiddleware` →
+`express.json()` → `/api` router → static `public/`.
 
-- Auth is first because `/term/<slug>/` *is* a shell; a gate mounted after the proxy is decorative.
+- The three gates are first because `/term/<slug>/` *is* a shell; a gate mounted after the proxy is
+  decorative. `access` verifies the Cloudflare Access JWT, `auth` is the dev-mode password, and
+  `guard` sets security headers and refuses cross-origin unsafe methods.
 - The proxy is before `express.json()` because a body parser would consume the request stream and
   forward an empty body to ttyd.
 - WebSocket upgrades never reach Express. They are wired onto the `http.Server` in
-  `server/index.js` (`auth.authorizeUpgrade` then `proxy.handleUpgrade`). Any change to auth or
-  proxying must be made in **both** the Express path and the upgrade path.
+  `server/index.js` (`access.authorizeUpgrade` → `auth.authorizeUpgrade` →
+  `guard.authorizeUpgrade` → `proxy.handleUpgrade`). Any change to auth, origin checks or proxying
+  must be made in **both** the Express path and the upgrade path.
 
 ### Module layering (`server/`)
 
@@ -66,7 +71,9 @@ supervisor.js  the only module with tmux+systemd side effects; real/stub swap
   systemd.js   unit rendering, install, systemctl --user
 proxy.js       /term/<slug>/* → 127.0.0.1:<port>, HTTP + ws
 screenshots.js upload validation, naming, injection
+access.js      Cloudflare Access JWT verification (RS256, JWKS cache), no-op unless configured
 auth.js        dev-mode password gate (HMAC cookie), no-op unless WEBTERM_DEV_PASSWORD is set
+guard.js       same-origin check (unsafe methods + upgrades) and security headers / CSP
 slug.js exec.js errors.js config.js
 ```
 
@@ -101,6 +108,14 @@ slug.js exec.js errors.js config.js
 - **Upload type comes from the magic bytes,** never from `Content-Type` or the multipart
   `filename`; the saved name is a server-generated timestamp opened `wx` at 0600. Uploads are
   buffered in memory so a rejected paste leaves nothing on disk.
+- **ttyd runs with `-O`, and the proxy keeps the browser's `Host` (`changeOrigin: false`).** The
+  two depend on each other: rewriting `Host` makes every same-origin WebSocket fail ttyd's origin
+  check. Don't drop either.
+- **Access verification has no exemptions** (no loopback bypass: cloudflared connects from
+  loopback) **and fails closed** when keys can't be fetched. Only RS256 is accepted; never let the
+  token's `alg` choose.
+- **The UI CSP is `script-src 'self'`.** Keep `public/index.html` free of inline scripts and
+  `on*=` handlers. `style-src` allows inline only because xterm.js injects `<style>`.
 - **Binding non-loopback without a dev password is a fatal startup error** (`assertBindIsSafe` in
   `index.js`). Keep it fatal.
 - **`systemd/webterm.service` in git carries a `/path/to/cloud_cli` placeholder** and is rewritten
@@ -129,7 +144,7 @@ Plain `<script>` tags; xterm.js is vendored as a prebuilt UMD bundle in `public/
 
 | File | Needs |
 |---|---|
-| `api` `proxy` `upload` `auth` `registry` `systemd` | nothing (supervisor stubbed / pure) |
+| `api` `proxy` `upload` `auth` `access` `guard` `registry` `systemd` | nothing (supervisor stubbed / pure; `access` signs its own JWTs with a generated key) |
 | `inject` `tmux` | real `tmux` (deliberately **not** stubbed; sets `TMUX_TMPDIR` to isolate) |
 | `frontend` | headless Chrome at `CHROME_PATH` or `/usr/bin/google-chrome` — **skips**, never fails, if absent; also needs `python3` for `scripts/ptyhost.py` |
 
